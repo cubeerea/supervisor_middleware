@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 EXECUTOR_STREAM = "executor_stream"  # executor -> supervisor: reasoning packets
 SUPERVISOR_INTERRUPTS = "supervisor_interrupts"  # supervisor -> executor: halt signals
+SUPERVISOR_ACKS = "supervisor_acks"  # supervisor -> executor: proceed verdicts (lets the tool gate skip the grace wait)
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -22,6 +23,7 @@ class Settings:
     executor_channel: str = field(default_factory=lambda: os.environ.get("EXECUTOR_CHANNEL", EXECUTOR_STREAM))
     interrupt_channel: str = field(
         default_factory=lambda: os.environ.get("INTERRUPT_CHANNEL", SUPERVISOR_INTERRUPTS))
+    ack_channel: str = field(default_factory=lambda: os.environ.get("ACK_CHANNEL", SUPERVISOR_ACKS))
 
     # Executor (Anthropic). The plan named Claude 3.5 Sonnet, which is retired; the current Sonnet is the default.
     executor_model: str = field(default_factory=lambda: os.environ.get("EXECUTOR_MODEL", "claude-sonnet-5-5"))

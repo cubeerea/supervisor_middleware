@@ -1,0 +1,23 @@
+# Use the host's native Ollama (Metal GPU on Apple Silicon) instead of the CPU-only ollama container.
+#
+#   ollama pull qwen2.5:3b-instruct     # once, on the host
+#   docker compose -f docker-compose.yml -f docker-compose.host-ollama.yml up -d
+#
+# The ollama / ollama-pull services are moved behind a profile so `up` no longer starts them, and the supervisor's
+# dependency on ollama-pull is replaced (`!override`, Compose v2.24+) with just Redis.
+
+services:
+  ollama:
+    profiles: ["container-ollama"]
+
+  ollama-pull:
+    profiles: ["container-ollama"]
+
+  supervisor:
+    environment:
+      OLLAMA_URL: ${HOST_OLLAMA_URL:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # Docker Desktop resolves this already; needed on Linux
+    depends_on: !override
+      redis:
+        condition: service_healthy

@@ -1,0 +1,13 @@
+.git
+.venv
+.env
+.agent
+.pytest_cache
+.ruff_cache
+**/__pycache__
+**/*.pyc
+results
+sandbox/*.db
+*.db-journal
+progress.json
+progress.json.tmp

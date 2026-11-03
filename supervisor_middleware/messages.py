@@ -32,6 +32,15 @@ class Verdict(BaseModel):
     reason: str = ""
 
 
+class VerdictAck(BaseModel):
+    """supervisor_acks: a proceed verdict. Not part of the kill path; it only tells the executor's tool gate
+    that it need not wait out the grace window for a late halt."""
+
+    run_id: str
+    status: Literal["proceed"] = "proceed"
+    published_at_ns: int = Field(default_factory=now_ns)
+
+
 class InterruptSignal(BaseModel):
     """supervisor_interrupts: published only for halt verdicts."""
 

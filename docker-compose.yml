@@ -1,0 +1,101 @@
+# Phase 1 scaffolding: Redis pub/sub bus, local Ollama (Qwen2.5-3B-Instruct) supervisor, executor/experiment runner.
+#
+#   docker compose up -d                    # redis + ollama (+ one-shot model pull) + supervisor daemon
+#   docker compose run --rm executor        # Phase-5 experiment (profile "run"; not started by `up`)
+#   docker compose --profile run up executor
+#
+# On macOS, Docker has no Metal GPU, so Qwen in the ollama container runs on CPU (slow). To use the host's native
+# Ollama instead:  docker compose -f docker-compose.yml -f docker-compose.host-ollama.yml up -d
+# Copy .env.example to .env to configure; every variable below has a default so `docker compose config` works bare.
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  image: supervisor-middleware:dev
+  volumes:
+    - ./results:/app/results
+  environment: &app-env
+    REDIS_URL: redis://redis:6379/0
+    EVENTS_PATH: /app/results/events.jsonl
+    SUPERVISOR_MODEL: ${SUPERVISOR_MODEL:-qwen2.5:3b-instruct}
+    LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+    LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+    LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-supervisor-middleware}
+    LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:0.40.12
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    environment:
+      OLLAMA_KEEP_ALIVE: 24h
+    healthcheck:
+      # The image ships no curl; `ollama list` talks to the local server and fails until it is up.
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+
+  ollama-pull:
+    image: ollama/ollama:0.40.12
+    entrypoint: ["ollama", "pull", "${SUPERVISOR_MODEL:-qwen2.5:3b-instruct}"]
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+
+  supervisor:
+    <<: *app
+    command: ["python", "supervisor_daemon.py", "--backend", "${SUPERVISOR_BACKEND:-ollama}"]
+    environment:
+      <<: *app-env
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      SUPERVISOR_BACKEND: ${SUPERVISOR_BACKEND:-ollama}
+      SUPERVISOR_TIMEOUT_S: ${SUPERVISOR_TIMEOUT_S:-30}
+    depends_on:
+      redis:
+        condition: service_healthy
+      ollama-pull:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  executor:
+    <<: *app
+    profiles: ["run"]
+    command: ["python", "run_experiment.py"]
+    environment:
+      <<: *app-env
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      EXECUTOR_MODEL: ${EXECUTOR_MODEL:-claude-sonnet-5-5}
+      EXECUTOR_BACKEND: ${EXECUTOR_BACKEND:-auto}
+      EXECUTOR_MAX_STEPS: ${EXECUTOR_MAX_STEPS:-12}
+      VERDICT_GRACE_S: ${VERDICT_GRACE_S:-3.0}
+    depends_on:
+      redis:
+        condition: service_healthy
+      supervisor:
+        condition: service_started
+    restart: "no"
+
+volumes:
+  ollama-models:

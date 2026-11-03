@@ -17,6 +17,7 @@ import redis.asyncio as aioredis
 from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
+_MEMORY_SERVER = None
 
 
 def _encode(payload: BaseModel | dict[str, Any]) -> str:
@@ -30,6 +31,15 @@ class AsyncRedisBus:
 
     @classmethod
     def from_url(cls, url: str) -> AsyncRedisBus:
+        """`redis://...` for a real server; `memory://` for an in-process fakeredis server shared by every bus
+        created in this process (single-process demos and tests; needs the dev dependency `fakeredis`)."""
+        if url.startswith("memory://"):
+            import fakeredis  # dev dependency, imported lazily
+
+            global _MEMORY_SERVER
+            if _MEMORY_SERVER is None:
+                _MEMORY_SERVER = fakeredis.FakeServer()
+            return cls(fakeredis.FakeAsyncRedis(server=_MEMORY_SERVER, decode_responses=True))
         return cls(aioredis.from_url(url, decode_responses=True))
 
     async def publish(self, channel: str, payload: BaseModel | dict[str, Any]) -> int:
@@ -65,9 +75,16 @@ class AsyncRedisBus:
         pubsub = self.client.pubsub(ignore_subscribe_messages=True)
         await pubsub.subscribe(*channels)
 
+        closed = False
+
         async def _iter() -> AsyncIterator[dict[str, Any]]:
-            while True:
-                msg = await pubsub.get_message(timeout=1.0)
+            while not closed:
+                try:
+                    msg = await pubsub.get_message(timeout=1.0)
+                except RuntimeError:  # pubsub closed underneath us (shutdown): end the iteration
+                    if closed:
+                        return
+                    raise
                 if msg is None:
                     continue
                 if msg.get("type") != "message":
@@ -84,6 +101,7 @@ class AsyncRedisBus:
         try:
             yield _iter()
         finally:
+            closed = True
             try:
                 await pubsub.unsubscribe(*channels)
                 await pubsub.aclose()
