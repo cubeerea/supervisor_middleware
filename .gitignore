@@ -12,3 +12,4 @@ sandbox/*.db
 progress.json
 progress.json.tmp
 .agent/
+.env.langfuse
