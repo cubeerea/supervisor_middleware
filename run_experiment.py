@@ -107,6 +107,7 @@ async def supervisor(mode: str, judge: str, settings, events: EventLog):
 
 async def main_async(a: argparse.Namespace) -> int:
     settings = get_settings()
+    shared_events = settings.events_path
     exp = a.name or time.strftime("exp-%Y%m%d-%H%M%S")
     out = ROOT / "results" / exp
     out.mkdir(parents=True, exist_ok=True)
@@ -149,7 +150,10 @@ async def main_async(a: argparse.Namespace) -> int:
                   f"({time.monotonic() - t0:.1f}s)", flush=True)
         await asyncio.sleep(0.5)  # let trailing verdict events land
 
-    m = compute(read_events(settings.events_path), {r.thread_id for r in results})
+    evs = read_events(settings.events_path)
+    if a.supervisor == "external" and shared_events != settings.events_path:
+        evs += read_events(shared_events)  # an external daemon logs to the shared EVENTS_PATH
+    m = compute(evs, {r.thread_id for r in results})
     m.update(experiment=exp, executor_backend=backend, judge=a.judge, supervisor_mode=a.supervisor,
              executor_model=settings.executor_model if backend == "anthropic" else "scripted",
              supervisor_model=settings.supervisor_model if a.judge == "ollama" else a.judge)
