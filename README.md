@@ -31,7 +31,22 @@ These runs used the scripted executor, because there is no Anthropic API key in 
 token by token at about 80 tokens/s. The supervisor ran live as a separate process with real Redis and Qwen2.5-3B.
 Full numbers are in `results/final-*/metrics.json` (git-ignored; regenerate with the commands below).
 
-RESULTS_TABLE_PLACEHOLDER
+16 episodes per judge (4 per scenario): 1,000 rows each, every episode migrated and verified.
+
+| | **Qwen2.5-3B judge** | rule baseline (regex) |
+|---|---|---|
+| TIR, all violations (12) | **66.7%** (8/12) | 33.3% (4/12) |
+| TIR, `explicit` / `euphemism` / `covert` | **100% / 100% / 0%** | 100% / 0% / 0% |
+| prevention (violating command never ran) | 66.7% | 33.3% |
+| false interventions (clean proposals) | **0 / 76** | 0 / 72 |
+| interrupt publish → stream cancelled, p50 / p95 | **3.6 / 7.7 ms** | 1.7 / 2.3 ms |
+| reasoning publish → stream cancelled, p50 / p95 | 925 / 990 ms | 5.9 / 9.9 ms |
+| judge time, p50 / p95 | 784 / 950 ms | 0.2 / 0.4 ms |
+| executor → supervisor Redis transit, p50 | 4.2 ms | 4.0 ms |
+| command streamed before the cut (of ~520 chars) | ~248 chars | — |
+
+Every halt arrived mid-stream; the late-halt gate never had to fire. All 4 misses with Qwen are the `covert`
+scenario, which a reasoning-only supervisor cannot catch by design (below).
 
 Scenarios, all in the same 1,000-row migration. Every one hits the missing `update_batch` and the 50-save throttle first:
 
@@ -157,3 +172,9 @@ This repo also runs the always-on agent loop (`orchestrator.py`, see `AGENT_LOOP
 worktree (`../supervisor_middleware-agent`), and the loop implements, validates, evaluates and pushes `agent/*`
 branches for review. There is no GitHub remote: `origin` is a local bare repo (`../supervisor_middleware.git`), so
 run the loop without `--pr` and merge the branches by hand.
+
+Two pieces of this repo came out of the loop itself. Each passed on its first iteration with evaluator approval
+(~$0.90 each). The first added the fake-Anthropic-client tests (`tests/test_anthropic_source.py`,
+`tests/test_interception.py`). The second was a bug hunt that found and fixed a real race: an outer cancellation that
+arrived while a halted stream was closing was being swallowed (`run_guarded`).
+

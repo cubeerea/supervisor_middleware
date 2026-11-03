@@ -1,9 +1,10 @@
 # Always-on agent loop: setup guide
 
-> **Status in `supervisor_middleware`:** guide only. The project is empty and not yet a git repo,
-> so `orchestrator.py` / `validate.py` haven't been copied in. Once the stack is chosen, follow
-> [Setup](#setup): copy the files from `~/Code/polytone`, fill in `validate.py`'s `CHECKS`, and
-> work through the [porting checklist](#3-adapt-it-to-the-project).
+> **Status in `supervisor_middleware`:** installed. `orchestrator.py`/`validate.py` are adapted (checks: ruff,
+> pytest, `docker compose config`). The agent worktree is `../supervisor_middleware-agent`, and the loop runs in tmux
+> session `agent` (`run --watch`, no `--pr`/`--routine`). There is no GitHub remote yet: `origin` is the local bare
+> repo `../supervisor_middleware.git`, so branches stay local and are merged by hand. To enable PRs and routines,
+> add a GitHub `origin` and restart with `run --watch --pr --routine`.
 
 This guide sets up an unattended coding loop that works through tasks you queue, checks its own
 work, and opens pull requests for you to review. It was built for Polytone but is meant to be
