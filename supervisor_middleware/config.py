@@ -43,8 +43,14 @@ class Settings:
     # Telemetry
     events_path: Path = field(
         default_factory=lambda: Path(os.environ.get("EVENTS_PATH", str(ROOT / "results" / "events.jsonl"))))
-    tracing: bool = field(default_factory=lambda: _bool("LANGSMITH_TRACING", False) and bool(
-        os.environ.get("LANGSMITH_API_KEY")))
+    # Langfuse: on when both keys are set (LANGFUSE_TRACING=false turns it off anyway).
+    langfuse_public_key: str = field(default_factory=lambda: os.environ.get("LANGFUSE_PUBLIC_KEY", ""))
+    langfuse_secret_key: str = field(default_factory=lambda: os.environ.get("LANGFUSE_SECRET_KEY", ""))
+    langfuse_host: str = field(default_factory=lambda: os.environ.get("LANGFUSE_HOST", "http://localhost:3000"))
+    langfuse_environment: str = field(default_factory=lambda: os.environ.get("LANGFUSE_TRACING_ENVIRONMENT",
+                                                                             "development"))
+    tracing: bool = field(default_factory=lambda: _bool("LANGFUSE_TRACING", True) and bool(
+        os.environ.get("LANGFUSE_PUBLIC_KEY")) and bool(os.environ.get("LANGFUSE_SECRET_KEY")))
 
     # Sandbox
     sandbox_dir: Path = field(default_factory=lambda: Path(os.environ.get("SANDBOX_DIR", str(ROOT / "sandbox"))))

@@ -1,7 +1,7 @@
 # Continuous Interception Middleware: Project Plan (original brief)
 
 Architecture: Hybrid Orchestration (Claude Sonnet executor API + local Qwen2.5-3B supervisor)
-Frameworks: LangGraph, Docker, Redis (Pub/Sub), LangSmith
+Frameworks: LangGraph, Docker, Redis (Pub/Sub), LangSmith (replaced by Langfuse, see README)
 Goal: a non-blocking, real-time context supervisor to prevent agent sycophancy and silent failure loops.
 
 1. **Docker & Pub/Sub scaffolding** – docker-compose with executor (LangGraph), Redis, Ollama/Qwen2.5-3B-Instruct.

@@ -16,13 +16,13 @@ def now_ns() -> int:
 class TrajectoryPacket(BaseModel):
     """executor_stream: published the moment the `reasoning` field of ProposeAction closes."""
 
-    run_id: str  # the executor generation's run id (LangSmith run id when tracing is on)
+    run_id: str  # the executor generation's run id
     thread_id: str  # one executor episode (many steps)
     step: int
     attempt: int = 0  # retries of the same step after a halt
     reasoning: str
     state: dict[str, Any] = Field(default_factory=dict)  # task + compact recent history
-    trace_headers: dict[str, str] | None = None  # RunTree.to_headers() for distributed tracing
+    trace_context: dict[str, str] | None = None  # Langfuse {"trace_id", "parent_span_id"} of executor_generate
     parent_run_id: str | None = None
     published_at_ns: int = Field(default_factory=now_ns)
 

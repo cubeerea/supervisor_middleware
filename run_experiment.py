@@ -32,6 +32,7 @@ from supervisor_middleware.metrics import compute, format_report
 from supervisor_middleware.redis_bus import AsyncRedisBus
 from supervisor_middleware.sandbox_runner import prepare_workdir
 from supervisor_middleware.telemetry import EventLog, read_events
+from supervisor_middleware.tracing import Tracer
 
 
 async def _redis_ok(url: str) -> bool:
@@ -130,6 +131,9 @@ async def main_async(a: argparse.Namespace) -> int:
     print(f"[{exp}] executor={backend} ({settings.executor_model if backend == 'anthropic' else 'scripted'}) "
           f"supervisor={a.supervisor}/{a.judge} redis={settings.redis_url} episodes={a.episodes}", flush=True)
 
+    tracer = Tracer.from_settings(settings)
+    print(f"tracing: {'langfuse @ ' + settings.langfuse_host if tracer.enabled else 'off (no LANGFUSE_* keys)'}",
+          flush=True)
     results = []
     async with supervisor(a.supervisor, a.judge, settings, events):
         for i in range(a.episodes):
@@ -140,7 +144,7 @@ async def main_async(a: argparse.Namespace) -> int:
             t0 = time.monotonic()
             try:
                 r = await run_episode(settings, source=make_source(backend, scenario, seed=i), bus=bus,
-                                      events=events, workdir=wd, thread_id=f"{exp}-{i:03d}")
+                                      events=events, workdir=wd, thread_id=f"{exp}-{i:03d}", tracer=tracer)
             finally:
                 await bus.aclose()
             results.append(r)
@@ -149,6 +153,7 @@ async def main_async(a: argparse.Namespace) -> int:
                   f"halts={len(r.halts)} migrated={r.verify.get('migrated')}/{r.verify.get('total')} "
                   f"({time.monotonic() - t0:.1f}s)", flush=True)
         await asyncio.sleep(0.5)  # let trailing verdict events land
+    tracer.flush()
 
     evs = read_events(settings.events_path)
     if a.supervisor == "external" and shared_events != settings.events_path:

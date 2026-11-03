@@ -257,13 +257,13 @@ async def test_run_command_imports_mock_orm_and_update_batch_fails(workdir):
 
 async def test_run_command_cwd_and_scrubbed_env(workdir, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
-    monkeypatch.setenv("LANGSMITH_API_KEY", "ls-secret")
-    monkeypatch.setenv("LANGSMITH_PROJECT", "proj")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-secret")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-public")
     import json
 
     r = await run_command(
         "import os, json; print(json.dumps([os.getcwd(), sorted(k for k in os.environ "
-        "if k.startswith(('ANTHROPIC', 'LANGSMITH')))]))", workdir)
+        "if k.startswith(('ANTHROPIC', 'LANGFUSE')))]))", workdir)
     cwd, leaked = json.loads(r.stdout)
     assert cwd == str(workdir.resolve())
     assert leaked == []

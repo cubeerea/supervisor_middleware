@@ -2,8 +2,10 @@
 publishes an InterruptSignal on `supervisor_interrupts` for every halt.
 
 Each packet is handled in its own task (bounded by a semaphore), so a slow verdict never delays reading the next
-packet. Every evaluation is a LangSmith `supervisor_evaluate` run stitched under the executor's run via the
-packet's `trace_headers` (distributed tracing); when tracing is off nothing touches LangSmith at all.
+packet. Every evaluation is a Langfuse `supervisor_evaluate` observation attached under the executor's
+`executor_generate` observation via the packet's `trace_context` (distributed tracing), with the Qwen call as a
+child `judge` generation and a `supervisor_halt` score on the executor's generation. When tracing is off nothing
+touches Langfuse at all.
 """
 from __future__ import annotations
 
@@ -16,13 +18,13 @@ import signal
 import time
 from typing import Any
 
-from langsmith import run_helpers
 from pydantic import ValidationError
 
 from ..config import Settings, get_settings
 from ..messages import InterruptSignal, TrajectoryPacket, Verdict, VerdictAck, now_ns
 from ..redis_bus import AsyncRedisBus
 from ..telemetry import EventLog
+from ..tracing import Tracer
 from .judge import Judge, make_judge
 
 log = logging.getLogger("supervisor")
@@ -47,74 +49,44 @@ async def _run_judge(judge: Judge, packet: TrajectoryPacket) -> tuple[Verdict, f
     return verdict, (time.perf_counter() - t0) * 1e3
 
 
-def _trace_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
-    p: TrajectoryPacket = inputs["packet"]
-    return {"run_id": p.run_id, "thread_id": p.thread_id, "step": p.step, "attempt": p.attempt,
-            "reasoning": p.reasoning, "task": p.state.get("task")}
-
-
-@run_helpers.traceable(name="supervisor_evaluate", run_type="chain", process_inputs=_trace_inputs)
-async def supervisor_evaluate(judge: Judge, packet: TrajectoryPacket, holder: dict[str, Any]) -> dict[str, Any]:
-    verdict, judge_ms = await _run_judge(judge, packet)
-    holder["result"] = (verdict, judge_ms)
-    rt = run_helpers.get_current_run_tree()
-    if rt is not None:
-        rt.add_metadata({"status": verdict.status, "reason": verdict.reason, "judge_ms": round(judge_ms, 3)})
-        rt.add_tags([f"status:{verdict.status}"])
-    return {"status": verdict.status, "reason": verdict.reason, "judge_ms": round(judge_ms, 3)}
-
-
 class SupervisorDaemon:
     def __init__(self, bus: AsyncRedisBus, judge: Judge, events: EventLog, settings: Settings, *,
-                 max_concurrency: int = 4, tracing: bool | None = None, ls_client: Any = None):
+                 max_concurrency: int = 4, tracer: Tracer | None = None):
         self.bus = bus
         self.judge = judge
         self.events = events
         self.settings = settings
-        self.tracing = settings.tracing if tracing is None else tracing
-        self.ls_client = ls_client  # langsmith.Client; None -> the ambient/cached default client
+        self.tracer = tracer if tracer is not None else Tracer.from_settings(settings)
         self.ready = asyncio.Event()
         self._sem = asyncio.Semaphore(max_concurrency)
         self._tasks: set[asyncio.Task] = set()
 
-    # ------------------------------------------------------------------ evaluation (+ LangSmith)
+    # ------------------------------------------------------------------ evaluation (+ Langfuse)
 
     async def _evaluate(self, packet: TrajectoryPacket, transit_ms: float) -> tuple[Verdict, float]:
-        if not self.tracing:
-            # Plain call: no RunTree, no client, no network. NB: passing `parent` headers to a traceable would
-            # force tracing on even inside tracing_context(enabled=False) (langsmith 0.14 `_setup_run`), so the
-            # disabled path must not go through the traceable at all.
-            with run_helpers.tracing_context(enabled=False):
-                return await _run_judge(self.judge, packet)
-
-        metadata = {
-            "executor_run_id": packet.run_id,
-            "thread_id": packet.thread_id,
-            "step": packet.step,
-            "attempt": packet.attempt,
-            "transit_ms": round(transit_ms, 3),
-            "supervisor_model": _judge_model(self.judge),
-            "judge": self.judge.name,
-        }
-        extra: dict[str, Any] = {"metadata": metadata}
-        if packet.trace_headers:
-            # Mapping parent -> RunTree.from_headers(): this run becomes a child of the executor's run.
-            extra["parent"] = packet.trace_headers
-        # tracing_context() resets every field it is not given, so carry the ambient client through explicitly.
-        client = self.ls_client or run_helpers.get_tracing_context().get("client")
-        if client is not None:
-            extra["client"] = client
-        holder: dict[str, Any] = {}
-        try:
-            with run_helpers.tracing_context(enabled=True, client=client):
-                await supervisor_evaluate(self.judge, packet, holder, langsmith_extra=extra)
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 - tracing problems must never cost us a verdict
-            log.warning("traced evaluation failed for run %s", packet.run_id, exc_info=True)
-        if "result" in holder:
-            return holder["result"]
-        return await _run_judge(self.judge, packet)
+        tr = self.tracer
+        if not tr.enabled:
+            return await _run_judge(self.judge, packet)
+        model = _judge_model(self.judge)
+        metadata = {"executor_run_id": packet.run_id, "thread_id": packet.thread_id, "step": packet.step,
+                    "attempt": packet.attempt, "transit_ms": round(transit_ms, 3), "supervisor_model": model,
+                    "judge": self.judge.name}
+        # trace_context = the executor's executor_generate observation: this becomes its child, in its trace.
+        with tr.observation("supervisor_evaluate", as_type="evaluator", trace_context=packet.trace_context,
+                            input={"reasoning": packet.reasoning, "task": packet.state.get("task")},
+                            metadata=metadata) as obs:
+            with tr.observation("judge", as_type="generation", model=model,
+                                input={"reasoning": packet.reasoning}) as gen:
+                verdict, judge_ms = await _run_judge(self.judge, packet)
+                tr.update(gen, output=verdict.model_dump())
+            tr.update(obs, output=verdict.model_dump(), level="WARNING" if verdict.status == "halt" else "DEFAULT",
+                      metadata={**metadata, "status": verdict.status, "reason": verdict.reason,
+                                "judge_ms": round(judge_ms, 3)})
+        if packet.trace_context:
+            tr.score("supervisor_halt", 1 if verdict.status == "halt" else 0, data_type="BOOLEAN",
+                     trace_id=packet.trace_context["trace_id"],
+                     observation_id=packet.trace_context.get("parent_span_id"), comment=verdict.reason[:500])
+        return verdict, judge_ms
 
     # ------------------------------------------------------------------ one packet
 
@@ -238,6 +210,7 @@ async def _amain(args: argparse.Namespace) -> int:
     bus = AsyncRedisBus.from_url(settings.redis_url)
     events = EventLog(settings.events_path)
     stop = asyncio.Event()
+    daemon: SupervisorDaemon | None = None
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         with contextlib.suppress(NotImplementedError):
@@ -251,17 +224,14 @@ async def _amain(args: argparse.Namespace) -> int:
                 log.warning("warmup of %s failed (%r); continuing", judge.name, e)
         daemon = SupervisorDaemon(bus, judge, events, settings, max_concurrency=args.max_concurrency)
         log.info("supervisor up: redis=%s judge=%s tracing=%s events=%s", settings.redis_url, judge.name,
-                 settings.tracing, settings.events_path)
+                 f"langfuse@{settings.langfuse_host}" if daemon.tracer.enabled else "off", settings.events_path)
         await daemon.run(stop)
     finally:
         if hasattr(judge, "aclose"):
             await judge.aclose()
         await bus.aclose()
-        if settings.tracing:
-            with contextlib.suppress(Exception):
-                from langsmith.run_trees import get_cached_client
-
-                await asyncio.to_thread(get_cached_client().flush, 10.0)
+        if daemon is not None:
+            await asyncio.to_thread(daemon.tracer.flush)
     log.info("supervisor stopped")
     return 0
 
