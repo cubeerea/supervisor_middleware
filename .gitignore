@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+.env
+results/
+sandbox/*.db
+*.db-journal
+
+# unattended agent loop (orchestrator.py): runtime state and logs
+progress.json
+progress.json.tmp
+.agent/

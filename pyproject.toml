@@ -1,0 +1,43 @@
+[project]
+name = "supervisor-middleware"
+version = "0.1.0"
+description = "Continuous interception middleware: a local supervisor model that halts an executor agent mid-generation"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.70",
+    "langgraph>=0.6",
+    "langsmith>=0.4",
+    "redis>=5.0",
+    "httpx>=0.27",
+    "pydantic>=2.7",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "fakeredis>=2.26",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+supervisor-daemon = "supervisor_middleware.supervisor.daemon:main"
+executor-run = "supervisor_middleware.executor.run:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["supervisor_middleware"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "ASYNC"]
