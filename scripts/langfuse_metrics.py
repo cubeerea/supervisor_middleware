@@ -58,10 +58,12 @@ def main(argv: list[str] | None = None) -> int:
                   fields="core,basic,io,metadata")
     scores: dict[tuple[str, str], float] = {}
     for name in ("supervisor_halt", "violation"):
-        for s in _pages(lf.api.scores.get_many, name=name, from_timestamp=since):
-            oid = _get(s, "observation_id") or _get(s, "observationId")
+        # v4 scores API: the observation link is only returned with the "subject" field group
+        for s in _pages(lf.api.scores.get_many, name=name, from_timestamp=since, fields="subject"):
+            subject = _get(s, "subject") or {}
+            oid = _get(subject, "id") or _get(s, "observation_id")
             if oid:
-                scores[(name, oid)] = float(_get(s, "value"))
+                scores[(name, oid)] = float(_get(s, "value"))  # BOOLEAN scores come back as True/False
 
     rows = []
     for g in gens:
