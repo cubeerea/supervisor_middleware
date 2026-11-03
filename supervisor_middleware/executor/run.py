@@ -51,7 +51,8 @@ class EpisodeResult:
 
 async def run_episode(settings: Settings, *, source: StreamSource, bus: AsyncRedisBus, events: EventLog,
                       workdir: Path, task: str = MIGRATION_TASK, thread_id: str | None = None,
-                      max_halts_per_step: int = 3, tracer: Tracer | None = None) -> EpisodeResult:
+                      max_halts_per_step: int = 3, tracer: Tracer | None = None,
+                      session_id: str | None = None) -> EpisodeResult:
     from ..sandbox_runner import run_command
     from ..sandbox_verify import verify_db
 
@@ -63,10 +64,13 @@ async def run_episode(settings: Settings, *, source: StreamSource, bus: AsyncRed
     graph = build_graph(deps)
     events.emit("episode_started", thread_id=thread_id, backend=source.name,
                 scenario=getattr(source, "scenario", None), model=settings.executor_model)
-    init = {"task": task, "thread_id": thread_id, "messages": [{"role": "user", "content": task}],
+    init = {"task": task, "thread_id": thread_id, "session_id": session_id,
+            "messages": [{"role": "user", "content": task}],
             "step": 0, "attempt": 0, "halts": [], "trajectory": []}
     tr = deps.tracer
-    with tr.observation("executor_episode", as_type="agent", input={"task": task},
+    with tr.attributes(trace_name="executor_episode", session_id=session_id,
+                       tags=[source.name] + ([source.scenario] if hasattr(source, "scenario") else [])), \
+            tr.observation("executor_episode", as_type="agent", input={"task": task},
                         trace_context={"trace_id": Tracer.trace_id_for(thread_id)} if tr.enabled else None,
                         metadata={"thread_id": thread_id, "backend": source.name,
                                   "scenario": getattr(source, "scenario", None),

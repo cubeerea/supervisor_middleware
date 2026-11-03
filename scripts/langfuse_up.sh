@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start (or stop) the local self-hosted Langfuse v3 stack.
+# Start (or stop) the local self-hosted Langfuse v4 stack.
 #
 #   scripts/langfuse_up.sh          # generate .env.langfuse if missing, start, wait, print creds
 #   scripts/langfuse_up.sh --down   # stop the stack (data volumes are kept)

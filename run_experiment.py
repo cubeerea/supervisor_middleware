@@ -144,7 +144,8 @@ async def main_async(a: argparse.Namespace) -> int:
             t0 = time.monotonic()
             try:
                 r = await run_episode(settings, source=make_source(backend, scenario, seed=i), bus=bus,
-                                      events=events, workdir=wd, thread_id=f"{exp}-{i:03d}", tracer=tracer)
+                                      events=events, workdir=wd, thread_id=f"{exp}-{i:03d}", tracer=tracer,
+                                      session_id=exp)
             finally:
                 await bus.aclose()
             results.append(r)

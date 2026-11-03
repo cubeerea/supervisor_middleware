@@ -1,8 +1,11 @@
-# Self-hosted Langfuse v3 for local tracing.
+# Self-hosted Langfuse v4 for local tracing (Python SDK langfuse>=4/5 targets server v4).
 #
-# Adapted from the official compose file at langfuse/langfuse tag v3.225.15
-# (https://github.com/langfuse/langfuse/blob/v3.225.15/docker-compose.yml).
-# Note: upstream `main` has moved to v4 images; this file deliberately pins v3.
+# Adapted from the official v4 compose file on langfuse/langfuse `main`
+# (https://github.com/langfuse/langfuse/blob/main/docker-compose.yml).
+# Fresh v4 deployment => default write mode `events_only`: legacy reads
+# (GET /api/public/traces, /observations, /scores, /v2/scores) return 404; use
+# /api/public/v2/observations and the Scores API v3 instead. Ingest via OTel.
+# v4 requires ClickHouse >= 25.12, Postgres >= 15, Redis >= 7.0.
 #
 # Differences from upstream:
 #   - separate compose project (`langfuse-local`) so it never collides with the app stack
@@ -29,6 +32,7 @@ x-langfuse-env: &langfuse-env
   CLICKHOUSE_USER: clickhouse
   CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set in .env.langfuse}
   CLICKHOUSE_CLUSTER_ENABLED: "false"
+  CLICKHOUSE_CLUSTER_NAME: default
   LANGFUSE_USE_AZURE_BLOB: "false"
   LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
   LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
@@ -41,9 +45,10 @@ x-langfuse-env: &langfuse-env
   LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
   LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
   LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?set in .env.langfuse}
-  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9090
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
   LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
   LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+  LANGFUSE_S3_MEDIA_UPLOAD_REQUEST_TIMEOUT_MS: "30000"
   LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
   REDIS_HOST: redis
   REDIS_PORT: "6379"
@@ -62,7 +67,7 @@ x-langfuse-depends-on: &langfuse-depends-on
 
 services:
   langfuse-worker:
-    image: docker.io/langfuse/langfuse-worker:3
+    image: docker.langfuse.com/langfuse/langfuse-worker:4
     restart: unless-stopped
     depends_on: *langfuse-depends-on
     environment:
@@ -70,7 +75,7 @@ services:
     mem_limit: 1g
 
   langfuse-web:
-    image: docker.io/langfuse/langfuse:3
+    image: docker.langfuse.com/langfuse/langfuse:4
     restart: unless-stopped
     depends_on: *langfuse-depends-on
     ports:
@@ -78,6 +83,9 @@ services:
     environment:
       <<: *langfuse-env
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?set in .env.langfuse}
+      # browser-facing presigned URLs use the host port; web itself talks to minio internally
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9090
+      LANGFUSE_S3_MEDIA_UPLOAD_INTERNAL_ENDPOINT: http://minio:9000
       # Headless initialization (https://langfuse.com/self-hosting/administration/headless-initialization)
       LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:?set in .env.langfuse}
       LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:?set in .env.langfuse}
@@ -94,7 +102,7 @@ services:
     mem_limit: 2g
 
   clickhouse:
-    image: docker.io/clickhouse/clickhouse-server:25.8
+    image: docker.io/clickhouse/clickhouse-server:26.3.62.3
     restart: unless-stopped
     user: "101:101"
     environment:

@@ -43,7 +43,8 @@ async def test_supervisor_observation_is_child_of_executor_generation(tmp_path, 
     await asyncio.wait_for(daemon.ready.wait(), 5)
     wd = prepare_workdir(tmp_path / "wd", rows=60)
     r = await run_episode(settings, source=ScriptedSource("explicit", chars_per_s=500, first_token_s=0.01),
-                          bus=ex_bus, events=events, workdir=wd, thread_id="ep-trace", tracer=lf.tracer)
+                          bus=ex_bus, events=events, workdir=wd, thread_id="ep-trace", tracer=lf.tracer,
+                          session_id="exp-trace")
     await daemon.drain(5)
     task.cancel()
     await sup_bus.aclose()
@@ -69,6 +70,11 @@ async def test_supervisor_observation_is_child_of_executor_generation(tmp_path, 
     halted = [g for g in gens.values() if _attr(g, "langfuse.observation.metadata.intercepted") in (True, "true")]
     assert len(halted) == 1
     assert _attr(halted[0], "langfuse.observation.level") == "WARNING"
+
+    # both processes stamp the trace name + session, so the trace is named right whichever span lands first
+    for sp in (*evals, episode):
+        assert _attr(sp, "langfuse.trace.name") == "executor_episode"
+        assert _attr(sp, "session.id") == "exp-trace"
 
     scores = lf.scores()
     halts = [s for s in scores if s["name"] == "supervisor_halt" and s["value"] == 1]

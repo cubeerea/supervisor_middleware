@@ -72,7 +72,8 @@ class SupervisorDaemon:
                     "attempt": packet.attempt, "transit_ms": round(transit_ms, 3), "supervisor_model": model,
                     "judge": self.judge.name}
         # trace_context = the executor's executor_generate observation: this becomes its child, in its trace.
-        with tr.observation("supervisor_evaluate", as_type="evaluator", trace_context=packet.trace_context,
+        with tr.attributes(trace_name="executor_episode", session_id=packet.state.get("session_id")), \
+                tr.observation("supervisor_evaluate", as_type="evaluator", trace_context=packet.trace_context,
                             input={"reasoning": packet.reasoning, "task": packet.state.get("task")},
                             metadata=metadata) as obs:
             with tr.observation("judge", as_type="generation", model=model,

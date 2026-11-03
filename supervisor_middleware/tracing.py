@@ -1,7 +1,8 @@
 """Langfuse tracing, behind a wrapper that is a strict no-op when tracing is off and never lets a tracing failure
 break the executor or the supervisor.
 
-Trace layout (one Langfuse trace per executor episode, ids are deterministic from the thread id):
+Trace layout (one Langfuse trace per executor episode, named `executor_episode`, ids deterministic from the thread
+id; an experiment's episodes share a Langfuse session = the experiment name):
 
     executor_episode            (agent,      executor process)
     ├── executor_generate       (generation, executor process)  one per ProposeAction stream; halted ones carry
@@ -54,6 +55,28 @@ class Tracer:
         from langfuse import Langfuse
 
         return Langfuse.create_trace_id(seed=seed)
+
+    @contextlib.contextmanager
+    def attributes(self, **kwargs: Any) -> Iterator[None]:
+        """Trace-level attributes (trace_name, session_id, tags, metadata) propagated to every observation started
+        inside the block. Each process sets them, so the trace is named correctly whichever span arrives first."""
+        if self.client is None:
+            yield
+            return
+        try:
+            from langfuse import propagate_attributes
+
+            cm = propagate_attributes(**kwargs)
+            cm.__enter__()
+        except Exception:  # noqa: BLE001
+            log.debug("propagate_attributes failed", exc_info=True)
+            yield
+            return
+        try:
+            yield
+        finally:
+            with contextlib.suppress(Exception):
+                cm.__exit__(None, None, None)
 
     @contextlib.contextmanager
     def observation(self, name: str, **kwargs: Any) -> Iterator[Any]:

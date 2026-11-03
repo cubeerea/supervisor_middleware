@@ -39,6 +39,7 @@ SEVERED = "\n# ... [stream severed by supervisor]"
 class ExecState(TypedDict, total=False):
     task: str
     thread_id: str
+    session_id: str | None  # Langfuse session (an experiment) grouping episode traces
     messages: list[dict[str, Any]]
     step: int
     attempt: int
@@ -140,7 +141,8 @@ def _publish(deps: ExecutorDeps, state: ExecState, turn: PartialTurn, reasoning:
         run_id=turn.run_id, thread_id=state["thread_id"], step=state.get("step", 0), attempt=state.get("attempt", 0),
         reasoning=reasoning, trace_context=trace_context,
         state={"task": state["task"], "step": state.get("step", 0), "last_observation": (last_obs or "")[-1500:],
-               "previous_halts": [h["reason"] for h in state.get("halts", [])][-3:]},
+               "previous_halts": [h["reason"] for h in state.get("halts", [])][-3:],
+               "session_id": state.get("session_id")},
     )
     turn.published_at_ns = packet.published_at_ns
     deps.bus.publish_nowait(deps.settings.executor_channel, packet)  # fire-and-forget: do NOT await
