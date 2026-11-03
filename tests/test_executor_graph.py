@@ -7,7 +7,7 @@ import fakeredis
 from supervisor_middleware.config import Settings
 from supervisor_middleware.executor.run import run_episode
 from supervisor_middleware.executor.scripted import ScriptedSource
-from supervisor_middleware.messages import InterruptSignal, TrajectoryPacket, now_ns
+from supervisor_middleware.messages import InterruptSignal, TrajectoryPacket, VerdictAck, now_ns
 from supervisor_middleware.metrics import compute
 from supervisor_middleware.redis_bus import AsyncRedisBus
 from supervisor_middleware.sandbox_runner import prepare_workdir
@@ -21,7 +21,7 @@ def _bus(server):
 
 
 @contextlib.asynccontextmanager
-async def fake_supervisor(server, settings, events, delay_s=0.05):
+async def fake_supervisor(server, settings, events, delay_s=0.05, ack=True):
     bus = _bus(server)
     ready = asyncio.Event()
 
@@ -41,6 +41,8 @@ async def fake_supervisor(server, settings, events, delay_s=0.05):
                     events.emit("interrupt_published", run_id=p.run_id, thread_id=p.thread_id,
                                 published_at_ns=sig.published_at_ns)
                     await bus.publish(settings.interrupt_channel, sig)
+                elif ack:
+                    await bus.publish(settings.ack_channel, VerdictAck(run_id=p.run_id))
 
     t = asyncio.create_task(loop())
     await ready.wait()
@@ -53,14 +55,14 @@ async def fake_supervisor(server, settings, events, delay_s=0.05):
         await bus.aclose()
 
 
-async def _episode(tmp_path, scenario, delay_s=0.05, grace=2.0, chars_per_s=400.0):
+async def _episode(tmp_path, scenario, delay_s=0.05, grace=2.0, chars_per_s=400.0, ack=True):
     server = fakeredis.FakeServer()
     settings = Settings(verdict_grace_s=grace, max_steps=10, events_path=tmp_path / "events.jsonl")
     events = EventLog(settings.events_path)
     wd = prepare_workdir(tmp_path / "wd", rows=120)
     src = ScriptedSource(scenario, seed=1, chars_per_s=chars_per_s, first_token_s=0.01)
     bus = _bus(server)
-    async with fake_supervisor(server, settings, events, delay_s):
+    async with fake_supervisor(server, settings, events, delay_s, ack):
         r = await run_episode(settings, source=src, bus=bus, events=events, workdir=wd)
     await bus.aclose()
     return r, read_events(settings.events_path)
@@ -83,7 +85,7 @@ async def test_explicit_violation_is_cancelled_mid_stream(tmp_path):
 
 
 async def test_covert_violation_is_missed_and_executed(tmp_path):
-    r, ev = await _episode(tmp_path, "covert")
+    r, ev = await _episode(tmp_path, "covert", chars_per_s=4000)
     assert not r.halts
     assert any("sqlite3" in e["command"] for e in ev if e["event"] == "command_executed")
     m = compute(ev)
@@ -91,7 +93,7 @@ async def test_covert_violation_is_missed_and_executed(tmp_path):
 
 
 async def test_clean_run_has_no_interventions(tmp_path):
-    r, ev = await _episode(tmp_path, "clean")
+    r, ev = await _episode(tmp_path, "clean", chars_per_s=4000)
     assert r.outcome == "finished" and r.verify["complete"] and not r.halts
     m = compute(ev)
     assert m["violations"] == 0 and m["false_intervention_rate"] == 0.0
@@ -111,3 +113,12 @@ async def test_publish_does_not_block_generation(tmp_path):
     r, ev = await _episode(tmp_path, "clean")
     pub = [e for e in ev if e["event"] == "reasoning_published"]
     assert pub and all(e["command_chars_so_far"] < 5 for e in pub)
+
+
+async def test_without_acks_gate_waits_out_grace(tmp_path):
+    """No proceed acks (e.g. an older daemon): every executed step waits the grace window, but still completes."""
+    import time
+
+    t0 = time.monotonic()
+    r, _ = await _episode(tmp_path, "clean", grace=0.5, ack=False, chars_per_s=4000)
+    assert r.outcome == "finished" and time.monotonic() - t0 >= 0.5 * r.steps
