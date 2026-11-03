@@ -2,9 +2,9 @@
 
 > **Status in `supervisor_middleware`:** installed. `orchestrator.py`/`validate.py` are adapted (checks: ruff,
 > pytest, `docker compose config`). The agent worktree is `../supervisor_middleware-agent`, and the loop runs in tmux
-> session `agent` (`run --watch`, no `--pr`/`--routine`). There is no GitHub remote yet: `origin` is the local bare
-> repo `../supervisor_middleware.git`, so branches stay local and are merged by hand. To enable PRs and routines,
-> add a GitHub `origin` and restart with `run --watch --pr --routine`.
+> session `agent` as `run --watch --pr`. `origin` is the private GitHub repo `cubeerea/supervisor_middleware`, so
+> passing tasks open PRs there; the old local bare repo `../supervisor_middleware.git` is the remote `local`.
+> Routines are off; to enable them, restart with `run --watch --pr --routine`.
 
 This guide sets up an unattended coding loop that works through tasks you queue, checks its own
 work, and opens pull requests for you to review. It was built for Polytone but is meant to be

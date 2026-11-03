@@ -170,8 +170,9 @@ uv run python scripts/redis_monitor.py      # watch both channels live
 
 This repo also runs the always-on agent loop (`orchestrator.py`, see `AGENT_LOOP.md`). Queue tasks from the agent
 worktree (`../supervisor_middleware-agent`), and the loop implements, validates, evaluates and pushes `agent/*`
-branches for review. There is no GitHub remote: `origin` is a local bare repo (`../supervisor_middleware.git`), so
-run the loop without `--pr` and merge the branches by hand.
+branches for review. `origin` is the private GitHub repo `cubeerea/supervisor_middleware` (the old local bare repo
+is now the remote `local`), and the loop runs as `run --watch --pr`, so each passing task opens a PR. Routines are
+off; enable them by adding `--routine`.
 
 Two pieces of this repo came out of the loop itself. Each passed on its first iteration with evaluator approval
 (~$0.90 each). The first added the fake-Anthropic-client tests (`tests/test_anthropic_source.py`,
