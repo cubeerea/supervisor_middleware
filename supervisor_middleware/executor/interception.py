@@ -128,6 +128,9 @@ class InterruptListener:
                 raise
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task  # let the stream's context manager close the HTTP connection
+            me = asyncio.current_task()
+            if me is not None and me.cancelling():  # caller cancelled from outside meanwhile: don't swallow it
+                raise
             cancelled = now_ns()
             sig = guard.signal
             self.events.emit(

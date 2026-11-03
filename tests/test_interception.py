@@ -49,3 +49,30 @@ async def test_wait_for_late_halt_waits_full_window_without_ack():
     await sup.aclose()
     assert sig is None
     assert elapsed >= grace_s - 0.05
+
+
+async def test_outer_cancel_during_halt_cleanup_is_not_swallowed():
+    """A halt cancels the stream; while the stream is still closing (HTTP teardown), the caller itself is
+    cancelled (e.g. an episode timeout). That outer cancellation must propagate, not become an InterceptionHalt."""
+    from supervisor_middleware.executor.interception import InterceptionHalt
+    from supervisor_middleware.messages import InterruptSignal
+
+    listener = InterruptListener(_bus(fakeredis.FakeServer()), INTERRUPTS)  # _on_signal driven directly
+    started = asyncio.Event()
+
+    async def stream():
+        started.set()
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.2)  # closing the HTTP response takes a moment
+            raise
+
+    caller = asyncio.create_task(listener.run_guarded("r1", stream()))
+    await started.wait()
+    listener._on_signal(InterruptSignal(run_id="r1", thread_id="t", reason="halt"))
+    await asyncio.sleep(0.05)  # the stream is now in its cleanup
+    caller.cancel()
+    result = (await asyncio.gather(caller, return_exceptions=True))[0]
+    assert not isinstance(result, InterceptionHalt), "outer cancellation was misreported as a supervisor halt"
+    assert isinstance(result, asyncio.CancelledError)
