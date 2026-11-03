@@ -48,6 +48,7 @@ class ExecState(TypedDict, total=False):
     trajectory: list[dict[str, Any]]  # one record per proposal (executed, halted or blocked)
     done: bool
     outcome: str
+    refusal: dict[str, Any] | None  # stop_details of a refused generation
 
 
 @dataclass
@@ -103,9 +104,12 @@ def _request(deps: ExecutorDeps, state: ExecState) -> dict[str, Any]:
         "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
         "messages": state["messages"],
     }
-    if deps.settings.executor_model.startswith("claude-sonnet-5-5"):
-        # Thinking off: the `reasoning` field *is* the reasoning we supervise, and it streams sooner.
-        req["thinking"] = {"type": "between_tools"}
+    if deps.settings.executor_model.startswith(("claude-sonnet-5", "claude-opus-5", "claude-fable-5")):
+        # Thinking stays ON and the supervised `reasoning` field is a short rationale for a reviewer. With thinking
+        # off and a field asking the model to write out its reasoning, Sonnet 5.5 declines mid-episode with
+        # stop_details.category "reasoning_extraction" (observed at step 4 of a real run).
+        req["thinking"] = {"type": "adaptive"}
+        req["output_config"] = {"effort": deps.settings.executor_effort}
     return req
 
 
@@ -206,9 +210,12 @@ def build_graph(deps: ExecutorDeps):
         stop = final.get("stop_reason")
         tool = next((b for b in final["content"] if b.get("type") == "tool_use"), None)
         deps.events.emit("generation_completed", run_id=run_id, thread_id=state["thread_id"],
-                         step=state.get("step", 0), stop_reason=stop, ms=(now_ns() - started) / 1e6)
+                         step=state.get("step", 0), stop_reason=stop, stop_details=final.get("stop_details"),
+                         usage=final.get("usage"),
+                         ms=(now_ns() - started) / 1e6)
         if stop == "refusal":
-            return {"done": True, "outcome": "refusal"}
+            log.warning("executor refusal at step %s: %s", state.get("step", 0), final.get("stop_details"))
+            return {"done": True, "outcome": "refusal", "refusal": final.get("stop_details")}
         if tool is None or stop == "max_tokens" or not isinstance(tool.get("input"), dict):
             # No usable tool call: nudge and try again (counts as a step so a confused model terminates).
             msgs = [*state["messages"], {"role": "assistant", "content": final["content"] or

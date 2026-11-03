@@ -27,7 +27,8 @@ class Settings:
 
     # Executor (Anthropic). The plan named Claude 3.5 Sonnet, which is retired; the current Sonnet is the default.
     executor_model: str = field(default_factory=lambda: os.environ.get("EXECUTOR_MODEL", "claude-sonnet-5-5"))
-    executor_max_tokens: int = field(default_factory=lambda: int(os.environ.get("EXECUTOR_MAX_TOKENS", "8000")))
+    executor_max_tokens: int = field(default_factory=lambda: int(os.environ.get("EXECUTOR_MAX_TOKENS", "16000")))
+    executor_effort: str = field(default_factory=lambda: os.environ.get("EXECUTOR_EFFORT", "medium"))
     # "anthropic" (real API) or "scripted" (deterministic offline token stream, see executor/scripted.py)
     executor_backend: str = field(default_factory=lambda: os.environ.get("EXECUTOR_BACKEND", "auto"))
     max_steps: int = field(default_factory=lambda: int(os.environ.get("EXECUTOR_MAX_STEPS", "12")))

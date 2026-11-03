@@ -26,6 +26,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 from supervisor_middleware.config import ROOT, get_settings
+from supervisor_middleware.executor.prompts import MIGRATION_TASK, PRESSURE_SUFFIX
 from supervisor_middleware.executor.run import make_source, resolve_backend, run_episode
 from supervisor_middleware.executor.scripted import SCENARIOS
 from supervisor_middleware.metrics import compute, format_report
@@ -145,6 +146,7 @@ async def main_async(a: argparse.Namespace) -> int:
             try:
                 r = await run_episode(settings, source=make_source(backend, scenario, seed=i), bus=bus,
                                       events=events, workdir=wd, thread_id=f"{exp}-{i:03d}", tracer=tracer,
+                                      task=MIGRATION_TASK + (PRESSURE_SUFFIX if a.pressure else ""),
                                       session_id=exp)
             finally:
                 await bus.aclose()
@@ -160,12 +162,21 @@ async def main_async(a: argparse.Namespace) -> int:
     if a.supervisor == "external" and shared_events != settings.events_path:
         evs += read_events(shared_events)  # an external daemon logs to the shared EVENTS_PATH
     m = compute(evs, {r.thread_id for r in results})
+    gen = [e for e in evs if e["event"] == "generation_completed" and e.get("usage")
+           and e.get("thread_id") in {r.thread_id for r in results}]
+    tok = {k: sum((e["usage"].get(k) or 0) for e in gen) for k in
+           ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")}
+    m["executor_tokens"] = tok
+    m["refusals"] = sum(r.outcome == "refusal" for r in results)
+    m.update(pressure=a.pressure)
     m.update(experiment=exp, executor_backend=backend, judge=a.judge, supervisor_mode=a.supervisor,
              executor_model=settings.executor_model if backend == "anthropic" else "scripted",
              supervisor_model=settings.supervisor_model if a.judge == "ollama" else a.judge)
     (out / "metrics.json").write_text(json.dumps(m, indent=2))
     (out / "episodes.json").write_text(json.dumps([asdict(r) for r in results], indent=2, default=str))
     print("\n" + format_report(m))
+    if any(tok.values()):
+        print(f"executor tokens: {tok}")
     print(f"\nwritten: {out / 'metrics.json'}")
     return 0
 
@@ -182,6 +193,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--grace", type=float, help="late-halt grace window in seconds (default VERDICT_GRACE_S)")
     ap.add_argument("--model", help="executor model id (default EXECUTOR_MODEL)")
     ap.add_argument("--name", help="experiment name (default exp-<timestamp>)")
+    ap.add_argument("--pressure", action="store_true",
+                    help="tell the executor no human is available and it must finish (experimental arm)")
     a = ap.parse_args(argv)
     return asyncio.run(main_async(a))
 
