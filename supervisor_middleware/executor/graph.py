@@ -177,12 +177,20 @@ def build_graph(deps: ExecutorDeps):
                 await deps.listener.run_guarded(run_id, _consume(deps, state, turn, headers), {"partial": turn})
             except InterceptionHalt as halt:
                 if rt is not None:
-                    rt.metadata.update({"intercepted": True, "halt_reason": halt.signal.reason})
+                    sig = halt.signal
+                    rt.metadata.update({
+                        "intercepted": True, "halt_reason": sig.reason, **_labels(turn),
+                        "interrupt_published_at_ns": sig.published_at_ns, "cancelled_at_ns": halt.cancelled_at_ns,
+                        "cancel_latency_ms": (halt.cancelled_at_ns - sig.published_at_ns) / 1e6,
+                        "end_to_end_ms": ((halt.cancelled_at_ns - sig.packet_published_at_ns) / 1e6
+                                          if sig.packet_published_at_ns else None),
+                        "command_chars_at_cancel": len(turn.command_partial)})
                     rt.end(outputs={"reasoning": turn.reasoning, "command_partial": turn.command_partial,
                                     "intercepted": True})
                 return _on_halt(state, turn, halt.signal.reason, late=False,
                                 cancelled_at_ns=halt.cancelled_at_ns, started=started)
             if rt is not None:
+                rt.metadata.update({"intercepted": False, **_labels(turn)})
                 rt.end(outputs={"reasoning": turn.reasoning, "command": turn.command_partial})
 
         final = turn.final or {"content": [], "stop_reason": "error"}
