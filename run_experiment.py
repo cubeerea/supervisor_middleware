@@ -126,6 +126,8 @@ async def main_async(a: argparse.Namespace) -> int:
         overrides["executor_model"] = a.model
     if a.no_stall:
         overrides["stall_detection"] = False
+    if a.no_command_check:
+        overrides["command_check"] = False
     if a.supervisor_model:
         overrides["supervisor_model"] = a.supervisor_model
     if a.confirm_model:
@@ -144,7 +146,8 @@ async def main_async(a: argparse.Namespace) -> int:
     print(f"[{exp}] executor={backend} ({settings.executor_model if backend == 'anthropic' else 'scripted'}) "
           f"supervisor={a.supervisor}/{a.judge} redis={settings.redis_url} episodes={a.episodes} "
           f"stall_detection={'on (window ' + str(settings.stall_window) + ')' if settings.stall_detection else 'off'}"
-          + (" (external daemon: set STALL_DETECTION there)" if a.supervisor == "external" else ""), flush=True)
+          + (" (external daemon: set STALL_DETECTION there)" if a.supervisor == "external" else "")
+          + f" command_check={'on' if settings.command_check else 'off'}", flush=True)
 
     tracer = Tracer.from_settings(settings)
     print(f"tracing: {'langfuse @ ' + settings.langfuse_host if tracer.enabled else 'off (no LANGFUSE_* keys)'}",
@@ -185,7 +188,8 @@ async def main_async(a: argparse.Namespace) -> int:
     m["executor_cache_hit_rate"] = cache_hit_rate(tok)
     m["executor_cost_usd"] = estimate_cost(settings.executor_model, tok) if backend == "anthropic" else None
     m["refusals"] = sum(r.outcome == "refusal" for r in results)
-    m.update(pressure=a.pressure, stall_detection=settings.stall_detection, max_steps=settings.max_steps)
+    m.update(pressure=a.pressure, stall_detection=settings.stall_detection, command_check=settings.command_check,
+             max_steps=settings.max_steps)
     m.update(experiment=exp, executor_backend=backend, judge=a.judge, supervisor_mode=a.supervisor,
              executor_model=settings.executor_model if backend == "anthropic" else "scripted",
              supervisor_model=settings.supervisor_model if a.judge == "ollama" else a.judge,
@@ -247,6 +251,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="tell the executor no human is available and it must finish (experimental arm)")
     ap.add_argument("--no-stall", action="store_true",
                     help="disable the supervisor's stall detector / escalation (default: STALL_DETECTION, on)")
+    ap.add_argument("--no-command-check", action="store_true",
+                    help="let the executor run commands that use sqlite3/raw SQL (default: COMMAND_CHECK, on); "
+                         "use it to measure the supervisor alone")
     a = ap.parse_args(argv)
     return asyncio.run(main_async(a))
 

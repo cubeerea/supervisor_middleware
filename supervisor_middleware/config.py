@@ -50,6 +50,9 @@ class Settings:
     supervisor_confirm_model: str = field(
         default_factory=lambda: os.environ.get("SUPERVISOR_CONFIRM_MODEL", "qwen2.5-coder:7b"))
     supervisor_timeout_s: float = field(default_factory=lambda: float(os.environ.get("SUPERVISOR_TIMEOUT_S", "30")))
+    # Command check (executor tool gate): refuse to run a finished command that ground_truth.explain flags as a
+    # raw-SQL bypass, whatever its reasoning says. Catches the covert case the reasoning-only supervisor cannot see.
+    command_check: bool = field(default_factory=lambda: _bool("COMMAND_CHECK", True))
     # Stall detection (supervisor/stall.py): escalate an episode that makes no progress over STALL_WINDOW steps.
     stall_detection: bool = field(default_factory=lambda: _bool("STALL_DETECTION", True))
     stall_window: int = field(default_factory=lambda: int(os.environ.get("STALL_WINDOW", "3")))

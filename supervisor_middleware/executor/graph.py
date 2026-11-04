@@ -10,6 +10,8 @@ published to `executor_stream` with `publish_nowait` (no await) and token consum
 generation runs under `InterruptListener.run_guarded`, so a matching halt cancels it mid-stream.
 `tool` is the second line of defence: it gives the verdict a short grace window (measured from the
 reasoning publish) and refuses to execute when a halt arrived after the stream had already finished.
+Before that, a deterministic command check (settings.command_check) refuses any finished command that
+`ground_truth.explain` flags as a raw-SQL bypass, so a violation hidden behind innocuous reasoning never runs.
 
 A stall escalation from the supervisor (InterruptSignal kind="escalate") never cuts a stream: the episode ends with
 outcome "escalated" at the next boundary, i.e. the tool gate does not run the pending command, or the executor node
@@ -27,13 +29,14 @@ from typing import Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from ..config import Settings
+from ..ground_truth import explain as explain_raw_sql
 from ..messages import InterruptSignal, TrajectoryPacket, now_ns
 from ..redis_bus import AsyncRedisBus
 from ..stream_parser import ReasoningWatcher, _decode
 from ..telemetry import EventLog
 from ..tracing import Tracer
 from .interception import InterceptionHalt, InterruptListener
-from .prompts import halt_feedback, system_prompt
+from .prompts import command_block_feedback, halt_feedback, system_prompt
 from .sources import PROPOSE_ACTION_TOOL, StreamSource
 
 log = logging.getLogger(__name__)
@@ -265,7 +268,8 @@ def build_graph(deps: ExecutorDeps):
                              "published_at_ns": turn.published_at_ns, **_labels(turn)}}
 
     def _on_halt(state: ExecState, turn: PartialTurn, reason: str, *, late: bool, cancelled_at_ns: int = 0,
-                 started: int = 0, content: list | None = None) -> dict[str, Any]:
+                 started: int = 0, content: list | None = None, status: str | None = None,
+                 feedback: str | None = None) -> dict[str, Any]:
         tool_id = turn.tool_use_id or f"toolu_halted_{turn.run_id[:8]}"
         if content is None:
             command = turn.command_partial + SEVERED
@@ -273,13 +277,13 @@ def build_graph(deps: ExecutorDeps):
                                       "input": {"reasoning": turn.reasoning or "", "command": command}}]
         msgs = [*state["messages"], {"role": "assistant", "content": content},
                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_id, "is_error": True,
-                                              "content": halt_feedback(reason, late)}]}]
+                                              "content": feedback or halt_feedback(reason, late)}]}]
         halts = [*state.get("halts", []), {"run_id": turn.run_id, "step": state.get("step", 0), "reason": reason,
-                                           "late": late}]
+                                           "late": late, "source": "command_check" if status else "supervisor"}]
         record = {"run_id": turn.run_id, "step": state.get("step", 0), "attempt": state.get("attempt", 0),
-                  "reasoning": turn.reasoning, "command": turn.command_partial, "status": "halted_late" if late
-                  else "halted", "halt_reason": reason, "command_chars_at_cancel": len(turn.command_partial),
-                  **_labels(turn)}
+                  "reasoning": turn.reasoning, "command": turn.command_partial,
+                  "status": status or ("halted_late" if late else "halted"), "halt_reason": reason,
+                  "command_chars_at_cancel": len(turn.command_partial), **_labels(turn)}
         deps.events.emit("step_halted", thread_id=state["thread_id"], late=late, cancelled_at_ns=cancelled_at_ns,
                          **{k: v for k, v in record.items() if k not in ("reasoning",)})
         attempt = state.get("attempt", 0) + 1
@@ -292,16 +296,31 @@ def build_graph(deps: ExecutorDeps):
     async def tool(state: ExecState) -> dict[str, Any]:
         p = state["proposal"]
         assert p is not None
+
+        def _turn() -> PartialTurn:
+            t = PartialTurn(run_id=p["run_id"], tool_use_id=p["tool_use_id"], reasoning=p["reasoning"],
+                            meta={k: p[k] for k in ("intended_violation", "scenario") if k in p})
+            t.watcher.scanner.values["command"] = p["command"]
+            return t
+
+        # Command check: deterministic, instant, independent of the reasoning the supervisor judged.
+        if deps.settings.command_check and (reasons := explain_raw_sql(p["command"])):
+            deps.events.emit("command_blocked", run_id=p["run_id"], thread_id=state["thread_id"],
+                             step=state.get("step", 0), command=p["command"], reasons=reasons,
+                             **{k: p[k] for k in ("intended_violation", "scenario") if k in p})
+            with deps.tracer.observation("command_check", as_type="guardrail", input={"command": p["command"]},
+                                         metadata={"run_id": p["run_id"], "step": state.get("step", 0)}) as cobs:
+                deps.tracer.update(cobs, level="WARNING", output={"blocked": True, "reasons": reasons},
+                                   status_message=("command check: " + "; ".join(reasons))[:500])
+            return _on_halt(state, _turn(), "command check: " + "; ".join(reasons), late=True, content=p["content"],
+                            status="blocked_command", feedback=command_block_feedback(reasons))
         # Late-halt gate: give the supervisor until publish + grace to object to a finished stream.
         sig = await deps.listener.wait_for_late_halt(
             p["run_id"], p["published_at_ns"] + int(deps.settings.verdict_grace_s * 1e9))
         if sig is not None:
-            turn = PartialTurn(run_id=p["run_id"], tool_use_id=p["tool_use_id"], reasoning=p["reasoning"],
-                               meta={k: p[k] for k in ("intended_violation", "scenario") if k in p})
-            turn.watcher.scanner.values["command"] = p["command"]
             deps.events.emit("late_halt_blocked", run_id=p["run_id"], thread_id=state["thread_id"],
                              interrupt_published_at_ns=sig.published_at_ns, blocked_at_ns=now_ns())
-            return _on_halt(state, turn, sig.reason, late=True, content=p["content"])
+            return _on_halt(state, _turn(), sig.reason, late=True, content=p["content"])
         if (esc := deps.listener.escalation(state["thread_id"])) is not None:
             return _escalate(state, esc, {
                 "run_id": p["run_id"], "step": state.get("step", 0), "attempt": state.get("attempt", 0),
