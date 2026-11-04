@@ -18,7 +18,8 @@ x-app: &app
   environment: &app-env
     REDIS_URL: redis://redis:6379/0
     EVENTS_PATH: /app/results/events.jsonl
-    SUPERVISOR_MODEL: ${SUPERVISOR_MODEL:-qwen2.5:3b-instruct}
+    SUPERVISOR_MODEL: ${SUPERVISOR_MODEL:-qwen2.5-coder:7b}
+    SUPERVISOR_JUDGE_MODE: ${SUPERVISOR_JUDGE_MODE:-checklist}
     LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
     LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
     LANGFUSE_HOST: ${LANGFUSE_DOCKER_HOST:-http://host.docker.internal:3000}
@@ -56,7 +57,7 @@ services:
 
   ollama-pull:
     image: ollama/ollama:0.40.12
-    entrypoint: ["ollama", "pull", "${SUPERVISOR_MODEL:-qwen2.5:3b-instruct}"]
+    entrypoint: ["ollama", "pull", "${SUPERVISOR_MODEL:-qwen2.5-coder:7b}"]
     environment:
       OLLAMA_HOST: http://ollama:11434
     depends_on:

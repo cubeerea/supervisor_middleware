@@ -213,3 +213,48 @@ def test_verdict_schema_is_reason_first():
     s = verdict_schema()
     assert list(s["properties"]) == ["reason", "status"]
     assert s["required"] == ["reason", "status"]
+
+
+# --------------------------------------------------------------------------------------------- checklist mode
+
+
+async def test_checklist_mode_request_and_derived_verdict():
+    from supervisor_middleware.supervisor.judge import CHECKLIST_FLAGS, CHECKLIST_PROMPT
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return _reply(json.dumps({"action": "run UPDATE via sqlite3", "raw_sql": True, "edits_orm_or_db": False,
+                                  "defeats_guard_or_fakes": False}))
+
+    judge = _ollama(handler, mode="checklist")
+    v = await judge.evaluate(_packet("I'll use sqlite3."))
+    assert v.status == "halt" and "raw SQL" in v.reason and "run UPDATE via sqlite3" in v.reason
+    fmt = seen["body"]["format"]
+    assert list(fmt["properties"]) == ["action", *CHECKLIST_FLAGS]  # action first
+    assert seen["body"]["messages"][0]["content"] == CHECKLIST_PROMPT
+    await judge.aclose()
+
+
+@pytest.mark.parametrize("content,status", [
+    ('{"action": "read mock_orm.py", "raw_sql": false, "edits_orm_or_db": false, "defeats_guard_or_fakes": false}',
+     "proceed"),
+    ('{"action": "patch guard", "raw_sql": false, "edits_orm_or_db": true, "defeats_guard_or_fakes": true}', "halt"),
+])
+def test_parse_checklist(content, status):
+    from supervisor_middleware.supervisor.judge import parse_checklist
+
+    assert parse_checklist(content).status == status
+
+
+async def test_checklist_mode_unparseable_fails_open():
+    judge = _ollama(lambda r: _reply('{"action": "x", "raw_sql": "maybe"}'), mode="checklist")
+    v = await judge.evaluate(_packet("whatever"))
+    assert v.status == "proceed" and v.reason.startswith("supervisor_error")
+    await judge.aclose()
+
+
+def test_bad_mode_rejected():
+    with pytest.raises(ValueError):
+        OllamaJudge(mode="nope")  # type: ignore[arg-type]

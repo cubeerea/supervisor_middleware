@@ -10,7 +10,7 @@ PULL=0
 [[ "${1:-}" == "--pull" ]] && PULL=1
 
 OLLAMA_URL="${OLLAMA_URL:-http://localhost:11434}"
-SUPERVISOR_MODEL="${SUPERVISOR_MODEL:-qwen2.5:3b-instruct}"
+SUPERVISOR_MODEL="${SUPERVISOR_MODEL:-qwen2.5-coder:7b}"
 if [[ -t 1 ]]; then G=$'\033[32m' Y=$'\033[33m' R=$'\033[31m' N=$'\033[0m'; else G='' Y='' R='' N=''; fi
 ok()   { printf '  %sok%s    %s\n' "$G" "$N" "$*"; }
 warn() { printf '  %swarn%s  %s\n' "$Y" "$N" "$*"; }

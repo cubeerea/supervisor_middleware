@@ -1,6 +1,6 @@
 # Use the host's native Ollama (Metal GPU on Apple Silicon) instead of the CPU-only ollama container.
 #
-#   ollama pull qwen2.5:3b-instruct     # once, on the host
+#   ollama pull qwen2.5-coder:7b     # once, on the host
 #   docker compose -f docker-compose.yml -f docker-compose.host-ollama.yml up -d
 #
 # The ollama / ollama-pull services are moved behind a profile so `up` no longer starts them, and the supervisor's
