@@ -10,6 +10,10 @@ published to `executor_stream` with `publish_nowait` (no await) and token consum
 generation runs under `InterruptListener.run_guarded`, so a matching halt cancels it mid-stream.
 `tool` is the second line of defence: it gives the verdict a short grace window (measured from the
 reasoning publish) and refuses to execute when a halt arrived after the stream had already finished.
+
+A stall escalation from the supervisor (InterruptSignal kind="escalate") never cuts a stream: the episode ends with
+outcome "escalated" at the next boundary, i.e. the tool gate does not run the pending command, or the executor node
+does not start another generation.
 """
 from __future__ import annotations
 
@@ -23,7 +27,7 @@ from typing import Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from ..config import Settings
-from ..messages import TrajectoryPacket, now_ns
+from ..messages import InterruptSignal, TrajectoryPacket, now_ns
 from ..redis_bus import AsyncRedisBus
 from ..stream_parser import ReasoningWatcher, _decode
 from ..telemetry import EventLog
@@ -49,6 +53,7 @@ class ExecState(TypedDict, total=False):
     done: bool
     outcome: str
     refusal: dict[str, Any] | None  # stop_details of a refused generation
+    escalation: dict[str, Any] | None  # the supervisor's stall escalation that ended the episode
 
 
 @dataclass
@@ -170,8 +175,24 @@ def _labels(turn: PartialTurn) -> dict[str, Any]:
 
 
 def build_graph(deps: ExecutorDeps):
+    def _escalate(state: ExecState, sig: InterruptSignal, record: dict[str, Any] | None = None) -> dict[str, Any]:
+        """End the episode on a stall escalation. `record` is the proposal that was not executed, if any."""
+        step = state.get("step", 0)
+        esc = {"reason": sig.reason, "step": step, "detected_at_step": sig.step, "signals": sig.signals,
+               "run_id": sig.run_id}
+        deps.events.emit("episode_escalated", thread_id=state["thread_id"], step=step,
+                         max_steps=deps.settings.max_steps, detected_at_step=sig.step, reason=sig.reason,
+                         signals=sig.signals, command_skipped=record is not None)
+        log.info("episode %s escalated at step %s: %s", state["thread_id"], step, sig.reason)
+        out: dict[str, Any] = {"done": True, "outcome": "escalated", "escalation": esc, "proposal": None}
+        if record is not None:
+            out["trajectory"] = [*state.get("trajectory", []), record]
+        return out
+
     async def executor(state: ExecState) -> dict[str, Any]:
         await deps.listener.start()  # background subscriber to supervisor_interrupts (idempotent)
+        if (esc := deps.listener.escalation(state["thread_id"])) is not None:
+            return _escalate(state, esc)
         run_id = str(uuid.uuid4())
         turn = PartialTurn(run_id=run_id, watcher=ReasoningWatcher(trigger=deps.trigger))  # type: ignore[arg-type]
         started = now_ns()
@@ -281,6 +302,11 @@ def build_graph(deps: ExecutorDeps):
             deps.events.emit("late_halt_blocked", run_id=p["run_id"], thread_id=state["thread_id"],
                              interrupt_published_at_ns=sig.published_at_ns, blocked_at_ns=now_ns())
             return _on_halt(state, turn, sig.reason, late=True, content=p["content"])
+        if (esc := deps.listener.escalation(state["thread_id"])) is not None:
+            return _escalate(state, esc, {
+                "run_id": p["run_id"], "step": state.get("step", 0), "attempt": state.get("attempt", 0),
+                "reasoning": p["reasoning"], "command": p["command"], "status": "escalated",
+                "escalation_reason": esc.reason, **{k: p[k] for k in ("intended_violation", "scenario") if k in p}})
 
         step = state.get("step", 0)
         record = {"run_id": p["run_id"], "step": step, "attempt": state.get("attempt", 0),

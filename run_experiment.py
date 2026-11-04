@@ -55,7 +55,9 @@ async def supervisor(mode: str, judge: str, settings, events: EventLog):
         yield
         return
     if mode == "spawn":
-        env = {**os.environ, "REDIS_URL": settings.redis_url, "EVENTS_PATH": str(settings.events_path)}
+        env = {**os.environ, "REDIS_URL": settings.redis_url, "EVENTS_PATH": str(settings.events_path),
+               "STALL_DETECTION": "true" if settings.stall_detection else "false",
+               "STALL_WINDOW": str(settings.stall_window)}
         proc = subprocess.Popen(  # noqa: ASYNC220 - Popen returns immediately; we never block on it here
             [sys.executable, str(ROOT / "supervisor_daemon.py"), "--backend", judge],
             env=env, cwd=ROOT)
@@ -120,6 +122,8 @@ async def main_async(a: argparse.Namespace) -> int:
         overrides["verdict_grace_s"] = a.grace
     if a.model:
         overrides["executor_model"] = a.model
+    if a.no_stall:
+        overrides["stall_detection"] = False
     settings = replace(settings, **overrides)
     if a.supervisor == "spawn" and settings.redis_url.startswith("memory://"):
         raise SystemExit("--supervisor spawn needs a real Redis; use --supervisor inline with memory://")
@@ -130,7 +134,9 @@ async def main_async(a: argparse.Namespace) -> int:
     scenarios = a.scenarios.split(",") if a.scenarios else list(SCENARIOS)
     events = EventLog(settings.events_path)
     print(f"[{exp}] executor={backend} ({settings.executor_model if backend == 'anthropic' else 'scripted'}) "
-          f"supervisor={a.supervisor}/{a.judge} redis={settings.redis_url} episodes={a.episodes}", flush=True)
+          f"supervisor={a.supervisor}/{a.judge} redis={settings.redis_url} episodes={a.episodes} "
+          f"stall_detection={'on (window ' + str(settings.stall_window) + ')' if settings.stall_detection else 'off'}"
+          + (" (external daemon: set STALL_DETECTION there)" if a.supervisor == "external" else ""), flush=True)
 
     tracer = Tracer.from_settings(settings)
     print(f"tracing: {'langfuse @ ' + settings.langfuse_host if tracer.enabled else 'off (no LANGFUSE_* keys)'}",
@@ -152,8 +158,9 @@ async def main_async(a: argparse.Namespace) -> int:
                 await bus.aclose()
             results.append(r)
             label = scenario if backend == "scripted" else "claude"
+            esc = f" escalated@step{r.escalation['step']}" if r.escalation else ""
             print(f"  episode {i + 1}/{a.episodes} [{label}] outcome={r.outcome} steps={r.steps} "
-                  f"halts={len(r.halts)} migrated={r.verify.get('migrated')}/{r.verify.get('total')} "
+                  f"halts={len(r.halts)}{esc} migrated={r.verify.get('migrated')}/{r.verify.get('total')} "
                   f"({time.monotonic() - t0:.1f}s)", flush=True)
         await asyncio.sleep(0.5)  # let trailing verdict events land
     tracer.flush()
@@ -170,7 +177,7 @@ async def main_async(a: argparse.Namespace) -> int:
     m["executor_cache_hit_rate"] = cache_hit_rate(tok)
     m["executor_cost_usd"] = estimate_cost(settings.executor_model, tok) if backend == "anthropic" else None
     m["refusals"] = sum(r.outcome == "refusal" for r in results)
-    m.update(pressure=a.pressure)
+    m.update(pressure=a.pressure, stall_detection=settings.stall_detection, max_steps=settings.max_steps)
     m.update(experiment=exp, executor_backend=backend, judge=a.judge, supervisor_mode=a.supervisor,
              executor_model=settings.executor_model if backend == "anthropic" else "scripted",
              supervisor_model=settings.supervisor_model if a.judge == "ollama" else a.judge)
@@ -222,6 +229,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--name", help="experiment name (default exp-<timestamp>)")
     ap.add_argument("--pressure", action="store_true",
                     help="tell the executor no human is available and it must finish (experimental arm)")
+    ap.add_argument("--no-stall", action="store_true",
+                    help="disable the supervisor's stall detector / escalation (default: STALL_DETECTION, on)")
     a = ap.parse_args(argv)
     return asyncio.run(main_async(a))
 

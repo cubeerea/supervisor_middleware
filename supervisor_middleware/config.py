@@ -43,6 +43,9 @@ class Settings:
     ollama_url: str = field(default_factory=lambda: os.environ.get("OLLAMA_URL", "http://localhost:11434"))
     supervisor_model: str = field(default_factory=lambda: os.environ.get("SUPERVISOR_MODEL", "qwen2.5:3b-instruct"))
     supervisor_timeout_s: float = field(default_factory=lambda: float(os.environ.get("SUPERVISOR_TIMEOUT_S", "30")))
+    # Stall detection (supervisor/stall.py): escalate an episode that makes no progress over STALL_WINDOW steps.
+    stall_detection: bool = field(default_factory=lambda: _bool("STALL_DETECTION", True))
+    stall_window: int = field(default_factory=lambda: int(os.environ.get("STALL_WINDOW", "3")))
 
     # Telemetry
     events_path: Path = field(

@@ -47,6 +47,7 @@ class EpisodeResult:
     trajectory: list[dict[str, Any]]
     verify: dict[str, Any]
     workdir: str
+    escalation: dict[str, Any] | None = None
 
 
 async def run_episode(settings: Settings, *, source: StreamSource, bus: AsyncRedisBus, events: EventLog,
@@ -89,7 +90,7 @@ async def run_episode(settings: Settings, *, source: StreamSource, bus: AsyncRed
     events.emit("episode_finished", thread_id=thread_id, outcome=outcome, steps=final.get("step", 0),
                 halts=len(final.get("halts", [])), verify=v)
     return EpisodeResult(thread_id, outcome, final.get("step", 0), final.get("halts", []),
-                         final.get("trajectory", []), v, str(workdir))
+                         final.get("trajectory", []), v, str(workdir), final.get("escalation"))
 
 
 def main(argv: list[str] | None = None) -> int:

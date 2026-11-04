@@ -8,6 +8,9 @@ connection). `run_guarded` turns that cancellation into an `InterceptionHalt` fo
 
 Halts that arrive after the stream already finished are kept (`late_halt`) so the tool node can
 refuse to execute the command.
+
+Escalations (`kind="escalate"`, from the supervisor's stall detector) never cancel anything: they are recorded per
+thread (`escalation(thread_id)`) and the graph ends the episode before executing its next command.
 """
 from __future__ import annotations
 
@@ -52,6 +55,7 @@ class InterruptListener:
     _guards: dict[str, _Guard] = field(default_factory=dict)
     _late: dict[str, InterruptSignal] = field(default_factory=dict)
     _acked: set[str] = field(default_factory=set)
+    _escalations: dict[str, InterruptSignal] = field(default_factory=dict)
     _waiters: dict[str, asyncio.Event] = field(default_factory=dict)
     _task: asyncio.Task | None = None
     _ready: asyncio.Event = field(default_factory=asyncio.Event)
@@ -99,6 +103,14 @@ class InterruptListener:
 
     def _on_signal(self, sig: InterruptSignal) -> None:
         received = now_ns()
+        if sig.kind == "escalate":
+            if sig.thread_id and sig.thread_id not in self._escalations:
+                self._escalations[sig.thread_id] = sig
+                self.events.emit("escalation_received", run_id=sig.run_id, thread_id=sig.thread_id, step=sig.step,
+                                 reason=sig.reason, redis_transit_ms=(received - sig.published_at_ns) / 1e6)
+            if ev := self._waiters.get(sig.run_id):  # wake the tool gate: it checks escalation() next
+                ev.set()
+            return
         guard = self._guards.get(sig.run_id)
         live = guard is not None and not guard.task.done()
         self.events.emit("interrupt_received", run_id=sig.run_id, thread_id=sig.thread_id, live=live,
@@ -142,6 +154,10 @@ class InterruptListener:
             raise InterceptionHalt(sig, (partial_ref or {}).get("partial"), cancelled) from None
         finally:
             self._guards.pop(run_id, None)
+
+    def escalation(self, thread_id: str) -> InterruptSignal | None:
+        """The stall escalation for this episode, if the supervisor sent one."""
+        return self._escalations.get(thread_id)
 
     def late_halt(self, run_id: str) -> InterruptSignal | None:
         return self._late.get(run_id)
