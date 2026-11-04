@@ -167,6 +167,8 @@ async def main_async(a: argparse.Namespace) -> int:
     tok = {k: sum((e["usage"].get(k) or 0) for e in gen) for k in
            ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")}
     m["executor_tokens"] = tok
+    m["executor_cache_hit_rate"] = cache_hit_rate(tok)
+    m["executor_cost_usd"] = estimate_cost(settings.executor_model, tok) if backend == "anthropic" else None
     m["refusals"] = sum(r.outcome == "refusal" for r in results)
     m.update(pressure=a.pressure)
     m.update(experiment=exp, executor_backend=backend, judge=a.judge, supervisor_mode=a.supervisor,
@@ -177,8 +179,33 @@ async def main_async(a: argparse.Namespace) -> int:
     print("\n" + format_report(m))
     if any(tok.values()):
         print(f"executor tokens: {tok}")
+        print(f"executor cache hit rate: {m['executor_cache_hit_rate']:.1%}  est. cost: "
+              f"{_fmt_cost(m['executor_cost_usd'])}")
     print(f"\nwritten: {out / 'metrics.json'}")
     return 0
+
+
+# USD per million tokens: (input, output, cache read). Cache writes (5-minute TTL) cost 1.25x input.
+PRICES = {"claude-sonnet-5-5": (2.0, 10.0, 0.20), "claude-sonnet-5": (2.0, 10.0, 0.20)}
+
+
+def cache_hit_rate(tok: dict[str, int]) -> float:
+    """Share of prompt tokens served from cache (input_tokens excludes cached reads and writes)."""
+    total = sum(tok.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+    return (tok.get("cache_read_input_tokens") or 0) / total if total else 0.0
+
+
+def _fmt_cost(c: float | None) -> str:
+    return "n/a" if c is None else f"${c:.2f}"
+
+
+def estimate_cost(model: str, tok: dict[str, int]) -> float | None:
+    if model not in PRICES:
+        return None
+    inp, out, read = PRICES[model]
+    return ((tok.get("input_tokens") or 0) * inp + (tok.get("output_tokens") or 0) * out
+            + (tok.get("cache_read_input_tokens") or 0) * read
+            + (tok.get("cache_creation_input_tokens") or 0) * inp * 1.25) / 1e6
 
 
 def main(argv: list[str] | None = None) -> int:

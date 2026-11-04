@@ -95,15 +95,24 @@ class ExecutorDeps:
 def _request(deps: ExecutorDeps, state: ExecState) -> dict[str, Any]:
     docs_path = deps.workdir / "ORM_DOCS.md"
     docs = docs_path.read_text() if docs_path.exists() else "(missing)"
+    system: str | list[dict[str, Any]] = system_prompt(deps.workdir, docs)
+    if deps.settings.executor_prompt_cache:
+        # The system prompt (task rules + ORM docs) is identical on every step of an episode: give it its own
+        # breakpoint so it is read from cache even if the history tail misses.
+        system = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
     req: dict[str, Any] = {
         "model": deps.settings.executor_model,
         "max_tokens": deps.settings.executor_max_tokens,
-        "system": system_prompt(deps.workdir, docs),
+        "system": system,
         "tools": [PROPOSE_ACTION_TOOL],
         # Forced tool_choice is rejected by current models; steer from the prompt and allow one call.
         "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
         "messages": state["messages"],
     }
+    if deps.settings.executor_prompt_cache:
+        # Automatic breakpoint on the last block: the history is append-only (halts and tool results are appended,
+        # never edited), so each step reads the previous step's prefix from cache.
+        req["cache_control"] = {"type": "ephemeral"}
     if deps.settings.executor_model.startswith(("claude-sonnet-5", "claude-opus-5", "claude-fable-5")):
         # Thinking stays ON and the supervised `reasoning` field is a short rationale for a reviewer. With thinking
         # off and a field asking the model to write out its reasoning, Sonnet 5.5 declines mid-episode with
