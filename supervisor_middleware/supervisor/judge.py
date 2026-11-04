@@ -370,16 +370,59 @@ class ScriptedJudge:
         return self._verdicts[min(idx, len(self._verdicts) - 1)]
 
 
+# --------------------------------------------------------------------------------------------- cascade
+
+
+class CascadeJudge:
+    """Fast screen, slow confirm. Every packet goes to `screen` (e.g. Qwen2.5-3B, ~1 s); only its halts go to
+    `confirm` (e.g. qwen2.5-coder:7b in checklist mode, ~5 s), and the halt stands only if both agree. Proceed
+    verdicts (most steps) keep the screen's latency; a false halt needs two models to fail on the same step.
+    `last_trace` exposes both verdicts for the daemon's metadata."""
+
+    def __init__(self, screen: Judge, confirm: Judge):
+        self.screen, self.confirm = screen, confirm
+        self.name = f"cascade({screen.name} -> {confirm.name})"
+        self.model = f"{getattr(screen, 'model', screen.name)}+{getattr(confirm, 'model', confirm.name)}"
+
+    async def evaluate(self, packet: TrajectoryPacket) -> Verdict:
+        first = await self.screen.evaluate(packet)
+        if first.status != "halt" or first.reason.startswith("supervisor_error"):
+            return first
+        second = await self.confirm.evaluate(packet)
+        if second.status == "halt":
+            return Verdict(status="halt", reason=second.reason)
+        return Verdict(status="proceed", reason=f"overruled screen halt ({first.reason[:200]}): {second.reason}"[:500])
+
+    async def warmup(self) -> float:
+        total = 0.0
+        for j in (self.screen, self.confirm):
+            if hasattr(j, "warmup"):
+                total += await j.warmup()
+        return total
+
+    async def aclose(self) -> None:
+        for j in (self.screen, self.confirm):
+            if hasattr(j, "aclose"):
+                await j.aclose()
+
+
 # --------------------------------------------------------------------------------------------- factory
 
 
 def make_judge(settings: Settings, backend: str | None = None, **kwargs: Any) -> Judge:
     backend = (backend or settings.supervisor_backend or "ollama").strip().lower()
     if backend == "ollama":
-        kwargs.setdefault("mode", settings.supervisor_judge_mode)
-        if kwargs["mode"] == "checklist":
+        mode = kwargs.pop("mode", settings.supervisor_judge_mode)
+        if mode == "cascade":
+            screen = OllamaJudge(settings.ollama_url, settings.supervisor_model, settings.supervisor_timeout_s,
+                                 mode="verdict", **kwargs)
+            confirm = OllamaJudge(settings.ollama_url, settings.supervisor_confirm_model, settings.supervisor_timeout_s,
+                                  mode="checklist", **{"num_predict": 160, **kwargs})
+            return CascadeJudge(screen, confirm)
+        if mode == "checklist":
             kwargs.setdefault("num_predict", 160)
-        return OllamaJudge(settings.ollama_url, settings.supervisor_model, settings.supervisor_timeout_s, **kwargs)
+        return OllamaJudge(settings.ollama_url, settings.supervisor_model, settings.supervisor_timeout_s, mode=mode,
+                           **kwargs)
     if backend in ("rules", "rule"):
         return RuleJudge()
     raise ValueError(f"unknown supervisor backend {backend!r} (expected 'ollama' or 'rules')")

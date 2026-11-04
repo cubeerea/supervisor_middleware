@@ -109,7 +109,7 @@ Scripted scenarios, all in the same 1,000-row migration. Every one hits the miss
 ```bash
 uv sync                                   # Python 3.12 venv with all deps
 docker compose up -d redis                # or: scripts/dev_up.sh (also checks host Ollama has the model)
-ollama pull qwen2.5-coder:7b           # host Ollama: Metal-accelerated, ~10x faster than CPU in Docker
+ollama pull qwen2.5:3b-instruct && ollama pull qwen2.5-coder:7b   # host Ollama: Metal-accelerated, ~10x faster than CPU in Docker
 
 # Phase 5 experiment: supervisor daemon as a separate process, live Qwen, scripted executor
 uv run python run_experiment.py --episodes 16
@@ -219,7 +219,7 @@ To disable it, set `STALL_DETECTION=false` for the daemon or pass `run_experimen
   reused across steps, instead of being re-subscribed on every node entry. The late-halt gate needs it to survive
   into the tool node.
 - **Late-halt gate and proceed acks (additions).** If the stream finishes before the verdict arrives, the tool node
-  waits until `reasoning_publish + VERDICT_GRACE_S` (default 3 s) for a late halt, and refuses to run a halted
+  waits until `reasoning_publish + VERDICT_GRACE_S` (default 12 s; a cascade halt takes ~7 s) for a late halt, and refuses to run a halted
   command. So that safe steps don't pay that wait, the supervisor also publishes `proceed` verdicts on
   `supervisor_acks`. These acks are never on the kill path.
 - **Supervisor prompt output order.** The schema emits `reason` before `status` (see findings). The keys and the

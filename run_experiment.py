@@ -58,6 +58,7 @@ async def supervisor(mode: str, judge: str, settings, events: EventLog):
         env = {**os.environ, "REDIS_URL": settings.redis_url, "EVENTS_PATH": str(settings.events_path),
                "STALL_DETECTION": "true" if settings.stall_detection else "false",
                "STALL_WINDOW": str(settings.stall_window), "SUPERVISOR_MODEL": settings.supervisor_model,
+               "SUPERVISOR_CONFIRM_MODEL": settings.supervisor_confirm_model,
                "SUPERVISOR_JUDGE_MODE": settings.supervisor_judge_mode}
         proc = subprocess.Popen(  # noqa: ASYNC220 - Popen returns immediately; we never block on it here
             [sys.executable, str(ROOT / "supervisor_daemon.py"), "--backend", judge],
@@ -127,6 +128,8 @@ async def main_async(a: argparse.Namespace) -> int:
         overrides["stall_detection"] = False
     if a.supervisor_model:
         overrides["supervisor_model"] = a.supervisor_model
+    if a.confirm_model:
+        overrides["supervisor_confirm_model"] = a.confirm_model
     if a.judge_mode:
         overrides["supervisor_judge_mode"] = a.judge_mode
     settings = replace(settings, **overrides)
@@ -186,7 +189,9 @@ async def main_async(a: argparse.Namespace) -> int:
     m.update(experiment=exp, executor_backend=backend, judge=a.judge, supervisor_mode=a.supervisor,
              executor_model=settings.executor_model if backend == "anthropic" else "scripted",
              supervisor_model=settings.supervisor_model if a.judge == "ollama" else a.judge,
-             judge_mode=settings.supervisor_judge_mode if a.judge == "ollama" else None)
+             judge_mode=settings.supervisor_judge_mode if a.judge == "ollama" else None,
+             confirm_model=settings.supervisor_confirm_model
+             if a.judge == "ollama" and settings.supervisor_judge_mode == "cascade" else None)
     (out / "metrics.json").write_text(json.dumps(m, indent=2))
     (out / "episodes.json").write_text(json.dumps([asdict(r) for r in results], indent=2, default=str))
     print("\n" + format_report(m))
@@ -228,9 +233,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--scenarios", help=f"comma list for the scripted backend (default: all of {','.join(SCENARIOS)})")
     ap.add_argument("--supervisor", choices=["spawn", "inline", "external"], default="spawn")
     ap.add_argument("--judge", choices=["ollama", "rules"], default="ollama")
-    ap.add_argument("--judge-mode", choices=["verdict", "checklist"],
+    ap.add_argument("--judge-mode", choices=["verdict", "checklist", "cascade"],
                     help="Ollama judge output mode (default SUPERVISOR_JUDGE_MODE)")
     ap.add_argument("--supervisor-model", help="Ollama model for the judge (default SUPERVISOR_MODEL)")
+    ap.add_argument("--confirm-model", help="Ollama model that re-checks halts in cascade mode "
+                                           "(default SUPERVISOR_CONFIRM_MODEL)")
     ap.add_argument("--redis-url")
     ap.add_argument("--rows", type=int, default=1000)
     ap.add_argument("--grace", type=float, help="late-halt grace window in seconds (default VERDICT_GRACE_S)")

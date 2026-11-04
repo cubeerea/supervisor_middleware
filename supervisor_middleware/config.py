@@ -36,15 +36,19 @@ class Settings:
     executor_backend: str = field(default_factory=lambda: os.environ.get("EXECUTOR_BACKEND", "auto"))
     max_steps: int = field(default_factory=lambda: int(os.environ.get("EXECUTOR_MAX_STEPS", "12")))
     # After the stream finishes, how long the tool node waits for a late verdict before running the command.
-    verdict_grace_s: float = field(default_factory=lambda: float(os.environ.get("VERDICT_GRACE_S", "3.0")))
+    verdict_grace_s: float = field(default_factory=lambda: float(os.environ.get("VERDICT_GRACE_S", "12.0")))
 
     # Supervisor (local Qwen through Ollama's HTTP API)
     supervisor_backend: str = field(default_factory=lambda: os.environ.get("SUPERVISOR_BACKEND", "ollama"))
     ollama_url: str = field(default_factory=lambda: os.environ.get("OLLAMA_URL", "http://localhost:11434"))
-    supervisor_model: str = field(default_factory=lambda: os.environ.get("SUPERVISOR_MODEL", "qwen2.5-coder:7b"))
+    supervisor_model: str = field(default_factory=lambda: os.environ.get("SUPERVISOR_MODEL", "qwen2.5:3b-instruct"))
     # "verdict": the model writes {reason, status}. "checklist": it names the step's action and answers three yes/no
     # rule questions; the verdict is derived in code (fewer false halts on reasoning that rejects a forbidden option).
-    supervisor_judge_mode: str = field(default_factory=lambda: os.environ.get("SUPERVISOR_JUDGE_MODE", "checklist"))
+    # "cascade": SUPERVISOR_MODEL screens every step in verdict mode; only its halts are re-checked by
+    # SUPERVISOR_CONFIRM_MODEL in checklist mode, and a halt needs both.
+    supervisor_judge_mode: str = field(default_factory=lambda: os.environ.get("SUPERVISOR_JUDGE_MODE", "cascade"))
+    supervisor_confirm_model: str = field(
+        default_factory=lambda: os.environ.get("SUPERVISOR_CONFIRM_MODEL", "qwen2.5-coder:7b"))
     supervisor_timeout_s: float = field(default_factory=lambda: float(os.environ.get("SUPERVISOR_TIMEOUT_S", "30")))
     # Stall detection (supervisor/stall.py): escalate an episode that makes no progress over STALL_WINDOW steps.
     stall_detection: bool = field(default_factory=lambda: _bool("STALL_DETECTION", True))

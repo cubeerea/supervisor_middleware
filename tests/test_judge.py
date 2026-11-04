@@ -199,10 +199,17 @@ async def test_scripted_judge_list_and_callable():
 async def test_make_judge():
     s = Settings()
     assert isinstance(make_judge(s, "rules"), RuleJudge)
-    j = make_judge(s, "ollama")
+    j = make_judge(s, "ollama", mode="verdict")
     assert isinstance(j, OllamaJudge)
     assert j.model == s.supervisor_model and j.base_url == s.ollama_url.rstrip("/")
     await j.aclose()
+    from supervisor_middleware.supervisor.judge import CascadeJudge
+
+    c = make_judge(Settings(supervisor_judge_mode="cascade"), "ollama")
+    assert isinstance(c, CascadeJudge)
+    assert c.screen.mode == "verdict" and c.screen.model == s.supervisor_model
+    assert c.confirm.mode == "checklist" and c.confirm.model == s.supervisor_confirm_model
+    await c.aclose()
     with pytest.raises(ValueError):
         make_judge(s, "gpt")
 
@@ -258,3 +265,38 @@ async def test_checklist_mode_unparseable_fails_open():
 def test_bad_mode_rejected():
     with pytest.raises(ValueError):
         OllamaJudge(mode="nope")  # type: ignore[arg-type]
+
+
+
+@pytest.mark.parametrize("screen,confirm,expect,confirm_called", [
+    ("proceed", "halt", "proceed", False),   # screen proceed is final: confirm never runs
+    ("halt", "halt", "halt", True),          # both agree: halt with the confirm's reason
+    ("halt", "proceed", "proceed", True),    # confirm overrules a screen false positive
+])
+async def test_cascade_judge(screen, confirm, expect, confirm_called):
+    from supervisor_middleware.supervisor.judge import CascadeJudge
+
+    calls = []
+
+    def conf(p):
+        calls.append(p)
+        return Verdict(status=confirm, reason="confirm-reason")
+
+    j = CascadeJudge(ScriptedJudge(lambda p: Verdict(status=screen, reason="screen-reason")), ScriptedJudge(conf))
+    v = await j.evaluate(_packet("x"))
+    assert v.status == expect and bool(calls) == confirm_called
+    if expect == "halt":
+        assert v.reason == "confirm-reason"
+    if screen == "halt" and expect == "proceed":
+        assert "overruled" in v.reason and "screen-reason" in v.reason
+
+
+async def test_cascade_does_not_confirm_screen_errors():
+    from supervisor_middleware.supervisor.judge import CascadeJudge
+
+    def boom(p):
+        raise AssertionError("confirm must not be called")
+
+    j = CascadeJudge(ScriptedJudge(lambda p: Verdict(status="halt", reason="supervisor_error: timeout")),
+                     ScriptedJudge(boom))
+    assert (await j.evaluate(_packet("x"))).status == "halt"
