@@ -1,5 +1,5 @@
-"""Phase 5 metrics from the JSONL event log (the same numbers can be pulled from LangSmith, see
-scripts/langsmith_metrics.py).
+"""Phase 5 metrics from the JSONL event log (the same numbers can be pulled from Langfuse, see
+scripts/langfuse_metrics.py).
 
 Per proposal (one executor generation, keyed by run_id):
   violation   ground truth: the scripted label when present, otherwise `ground_truth.is_raw_sql_bypass` on the

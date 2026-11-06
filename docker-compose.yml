@@ -19,10 +19,10 @@ x-app: &app
     REDIS_URL: redis://redis:6379/0
     EVENTS_PATH: /app/results/events.jsonl
     SUPERVISOR_MODEL: ${SUPERVISOR_MODEL:-qwen2.5:3b-instruct}
-    LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
-    LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
-    LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-supervisor-middleware}
-    LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+    LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+    LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+    LANGFUSE_HOST: ${LANGFUSE_DOCKER_HOST:-http://host.docker.internal:3000}
+    LANGFUSE_TRACING: ${LANGFUSE_TRACING:-true}
 
 services:
   redis:

@@ -13,8 +13,9 @@ Writes (both git-ignored):
     .agent/feedback.log      only the failures, stderr first: what orchestrator.py hands back to the agent
 
 Exit code 0 = everything passed, 1 = something failed. Standard library only.
-Tests run offline: ANTHROPIC_API_KEY / LANGSMITH_API_KEY are blanked, tracing is off, and the tests use
-scripted LLM streams and fakeredis, so nothing touches the real API, Ollama, LangSmith or Redis.
+Tests run offline: ANTHROPIC_API_KEY and the LANGFUSE_* keys are blanked, tracing is off, and the tests use
+scripted LLM streams, fakeredis and an in-memory Langfuse exporter, so nothing touches the real API, Ollama,
+Langfuse or Redis.
 """
 from __future__ import annotations
 
@@ -57,8 +58,8 @@ def tail(text: str, n: int = TAIL_LINES) -> str:
 
 
 def run(check: Check) -> dict:
-    env = {**os.environ, "ANTHROPIC_API_KEY": "", "LANGSMITH_API_KEY": "", "LANGSMITH_TRACING": "false",
-           "LANGCHAIN_TRACING_V2": "false", "CI": "1"}  # offline, like CI; never the real key
+    env = {**os.environ, "ANTHROPIC_API_KEY": "", "LANGFUSE_PUBLIC_KEY": "", "LANGFUSE_SECRET_KEY": "",
+           "LANGFUSE_TRACING": "false", "LANGSMITH_TRACING": "false", "LANGCHAIN_TRACING_V2": "false", "CI": "1"}  # offline, like CI; never the real key
     start = time.monotonic()
     try:
         r = subprocess.run(check.cmd, check=False, cwd=ROOT / check.cwd, env=env, capture_output=True, text=True,

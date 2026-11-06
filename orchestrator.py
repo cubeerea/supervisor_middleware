@@ -146,7 +146,7 @@ ROUTINES = {
             "behaviour is never asserted in tests/. Look at `git log --oneline -20` and prefer an area recent routine commits did not touch. "
             "Add focused tests that assert real behaviour and would fail if it broke. Tests run offline: scripted LLM "
             "streams, fakeredis and temp SQLite (see tests/conftest.py); never the real Anthropic API, Ollama, "
-            "LangSmith or a live Redis. If a new test exposes a bug, fix it minimally and say so in the commit message. Do not "
+            "Langfuse or a live Redis. If a new test exposes a bug, fix it minimally and say so in the commit message. Do not "
             "rewrite existing tests unless they are wrong. Keep the diff small: one area per run. "
             f"If every important behaviour you checked is already covered, start your final message with "
             f"`{NOOP_MARK} <areas checked>`."
@@ -298,7 +298,7 @@ def context(p: dict) -> str:
         "2. Before finishing, run `python3 validate.py` and make it pass.",
         "3. Commit with `git add <specific paths>` then `git commit -m ...` (never `git add -A`).",
         "4. Never edit validate.py, orchestrator.py, progress.json, .github/ or sandbox/ORM_DOCS.md. Never",
-        "   read .env or results/, and never call the real Anthropic API, LangSmith or a live Redis from tests.",
+        "   read .env or results/, and never call the real Anthropic API, Langfuse or a live Redis from tests.",
         "5. Do not weaken, skip or delete tests to make validation pass.",
         "6. If the task is impossible, unsafe or too ambiguous to do without a human, stop and make the",
         "   first line of your final message `BLOCKED: <one-sentence reason>`.",

@@ -3,13 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 from unittest import mock
 
 import fakeredis
 import pytest
-import requests
-from langsmith import run_helpers, run_trees
 
 from supervisor_middleware.config import Settings
 from supervisor_middleware.messages import InterruptSignal, TrajectoryPacket, Verdict, now_ns
@@ -181,76 +178,14 @@ async def test_handle_directly_and_crashing_judge(buses, events):
     assert v2.status == "halt"
 
 
-async def test_trace_headers_with_tracing_disabled_no_network(buses, events, monkeypatch):
-    """trace_headers present + tracing off: no RunTree, no LangSmith client, no HTTP."""
-    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2-fake")
-    monkeypatch.setenv("LANGSMITH_TRACING", "true")  # even with env tracing on, Settings.tracing=False wins
+async def test_trace_context_with_tracing_disabled_never_builds_a_client(buses, events, monkeypatch):
+    """trace_context present + tracing off: no Langfuse client is created and nothing is exported."""
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-fake")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-fake")
     sup, _ = buses
-    parent = run_trees.RunTree(name="executor_generate", run_type="llm")
-    seen_trees = []
-
-    def fn(p):
-        seen_trees.append(run_helpers.get_current_run_tree())
-        return Verdict(status="halt", reason="x")
-
-    daemon = SupervisorDaemon(sup, ScriptedJudge(fn), events, SETTINGS)
-    with mock.patch("requests.Session.request", side_effect=AssertionError("network call")) as req, \
-            mock.patch("langsmith.client.Client.__init__", side_effect=AssertionError("client built")) as ctor:
-        v = await daemon.handle(_packet("r", "x", trace_headers=parent.to_headers(), parent_run_id=str(parent.id)))
-        await asyncio.sleep(0.05)
+    daemon = SupervisorDaemon(sup, ScriptedJudge([Verdict(status="halt", reason="x")]), events, SETTINGS)
+    assert not daemon.tracer.enabled
+    with mock.patch("langfuse.Langfuse.__init__", side_effect=AssertionError("client built")) as ctor:
+        v = await daemon.handle(_packet("r", "x", trace_context={"trace_id": "a" * 32, "parent_span_id": "b" * 16}))
     assert v.status == "halt"
-    assert seen_trees == [None]
-    req.assert_not_called()
     ctor.assert_not_called()
-
-
-class _FakeSession(requests.Session):
-    def __init__(self):
-        super().__init__()
-        self.requests = []
-
-    def request(self, method, url, *a, **kw):
-        self.requests.append((method, url, kw))
-        resp = mock.Mock(status_code=200, text="{}", headers={})
-        resp.json.return_value = {}
-        resp.raise_for_status.return_value = None
-        return resp
-
-
-async def test_trace_parent_is_stitched_when_tracing_enabled(buses, events):
-    """With tracing on, the supervisor_evaluate run is a child of the executor run named in trace_headers."""
-    from langsmith import Client
-
-    sup, _ = buses
-    session = _FakeSession()
-    client = Client(api_url="http://langsmith.invalid", api_key="fake", session=session, auto_batch_tracing=False,
-                    info={})
-    parent = run_trees.RunTree(name="executor_generate", run_type="llm", client=client)
-    captured = {}
-
-    def fn(p):
-        rt = run_helpers.get_current_run_tree()
-        captured.update(name=rt.name, parent_run_id=rt.parent_run_id, trace_id=rt.trace_id,
-                        metadata=dict(rt.metadata))
-        return Verdict(status="halt", reason="raw SQL")
-
-    daemon = SupervisorDaemon(sup, ScriptedJudge(fn), events, SETTINGS, tracing=True)
-    with run_helpers.tracing_context(client=client):
-        v = await daemon.handle(_packet("exec-run", "x", step=3, trace_headers=parent.to_headers()))
-    assert v.status == "halt"
-    assert captured["name"] == "supervisor_evaluate"
-    assert captured["parent_run_id"] == parent.id and captured["trace_id"] == parent.trace_id
-    md = captured["metadata"]
-    assert md["executor_run_id"] == "exec-run" and md["step"] == 3 and md["thread_id"] == "thread-1"
-    assert "transit_ms" in md and md["supervisor_model"] == "scripted"
-    client.flush()
-    posted = [json.loads(kw["data"]) for (_m, url, kw) in session.requests
-              if isinstance(kw.get("data"), (bytes, str)) and "/runs" in url]
-    assert all("langsmith.invalid" in url for (_m, url, _kw) in session.requests)
-    assert posted, "expected the supervisor_evaluate run to be posted to the (fake) LangSmith session"
-    assert posted[0]["parent_run_id"] == str(parent.id)
-    end = [r for r in posted if r.get("outputs")][-1]  # end-of-run PATCH carries the verdict metadata
-    meta = end["extra"]["metadata"]
-    assert meta["status"] == "halt" and meta["reason"] == "raw SQL" and "judge_ms" in meta
-    assert meta["executor_run_id"] == "exec-run"
-    assert "status:halt" in end["tags"]

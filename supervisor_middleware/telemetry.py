@@ -1,6 +1,6 @@
 """Append-only JSONL event log shared by executor and supervisor processes.
 
-LangSmith holds the distributed trace; this file holds the same timestamps locally so TIR and
+Langfuse holds the distributed trace; this file holds the same timestamps locally so TIR and
 interception latency can be computed with no network (see metrics.py)."""
 from __future__ import annotations
 

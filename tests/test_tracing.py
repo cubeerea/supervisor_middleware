@@ -1,11 +1,10 @@
-"""Distributed tracing: the supervisor's run is stitched under the executor's generation run."""
-import json
+"""Distributed tracing (Langfuse): supervisor observations are children of the executor's generation, in the
+episode's trace, and halts are recorded as scores. Offline: in-memory span exporter + mock HTTP."""
+import asyncio
 from dataclasses import replace
-from unittest import mock
 
 import fakeredis
-import requests
-from langsmith import Client, run_helpers
+import pytest
 
 from supervisor_middleware.config import Settings
 from supervisor_middleware.executor.run import run_episode
@@ -15,28 +14,23 @@ from supervisor_middleware.sandbox_runner import prepare_workdir
 from supervisor_middleware.supervisor.daemon import SupervisorDaemon
 from supervisor_middleware.supervisor.judge import RuleJudge
 from supervisor_middleware.telemetry import EventLog
+from supervisor_middleware.tracing import Tracer
+from tests.tracing_fakes import FakeLangfuse
 
 
-class _FakeSession(requests.Session):
-    def __init__(self):
-        super().__init__()
-        self.requests = []
-
-    def request(self, method, url, *a, **kw):
-        self.requests.append((method, url, kw))
-        resp = mock.Mock(status_code=200, text="{}", headers={})
-        resp.json.return_value = {}
-        resp.raise_for_status.return_value = None
-        return resp
+@pytest.fixture
+def lf():
+    f = FakeLangfuse()
+    yield f
+    f.close()
 
 
-async def test_supervisor_run_is_child_of_executor_run(tmp_path):
-    import asyncio
+def _attr(span, key):
+    return (span.attributes or {}).get(key)
 
-    session = _FakeSession()
-    client = Client(api_url="http://langsmith.invalid", api_key="fake", session=session, auto_batch_tracing=False,
-                    info={})
-    settings = replace(Settings(), tracing=True, events_path=tmp_path / "ev.jsonl", max_steps=8)
+
+async def test_supervisor_observation_is_child_of_executor_generation(tmp_path, lf):
+    settings = replace(Settings(), events_path=tmp_path / "ev.jsonl", max_steps=8)
     events = EventLog(settings.events_path)
     server = fakeredis.FakeServer()
 
@@ -44,32 +38,62 @@ async def test_supervisor_run_is_child_of_executor_run(tmp_path):
         return AsyncRedisBus(fakeredis.FakeAsyncRedis(server=server, decode_responses=True))
 
     sup_bus, ex_bus = bus(), bus()
-    daemon = SupervisorDaemon(sup_bus, RuleJudge(), events, settings, tracing=True)
-    with run_helpers.tracing_context(enabled=True, client=client):
-        task = asyncio.create_task(daemon.run())
-        await asyncio.wait_for(daemon.ready.wait(), 5)
-        wd = prepare_workdir(tmp_path / "wd", rows=60)
-        r = await run_episode(settings, source=ScriptedSource("explicit", chars_per_s=500, first_token_s=0.01),
-                              bus=ex_bus, events=events, workdir=wd)
-        await daemon.drain(5)
-        task.cancel()
-    client.flush()
+    daemon = SupervisorDaemon(sup_bus, RuleJudge(), events, settings, tracer=lf.tracer)
+    task = asyncio.create_task(daemon.run())
+    await asyncio.wait_for(daemon.ready.wait(), 5)
+    wd = prepare_workdir(tmp_path / "wd", rows=60)
+    r = await run_episode(settings, source=ScriptedSource("explicit", chars_per_s=500, first_token_s=0.01),
+                          bus=ex_bus, events=events, workdir=wd, thread_id="ep-trace", tracer=lf.tracer,
+                          session_id="exp-trace")
+    await daemon.drain(5)
+    task.cancel()
+    await sup_bus.aclose()
+    await ex_bus.aclose()
     assert r.halts and r.outcome == "finished"
 
-    runs: dict[str, dict] = {}
-    for _method, url, kw in session.requests:
-        data = kw.get("data")
-        if not isinstance(data, (bytes, str)) or "/runs" not in url:
-            continue
-        body = json.loads(data)
-        rid = body.get("id") or url.rstrip("/").split("/")[-1]
-        runs.setdefault(rid, {}).update({k: v for k, v in body.items() if v is not None})
-    gens = {k: v for k, v in runs.items() if v.get("name") == "executor_generate"}
-    evals = [v for v in runs.values() if v.get("name") == "supervisor_evaluate"]
-    assert gens and evals
+    spans = lf.spans()
+    by_name: dict[str, list] = {}
+    for s in spans:
+        by_name.setdefault(s.name, []).append(s)
+    (episode,) = by_name["executor_episode"]
+    gens = {s.context.span_id: s for s in by_name["executor_generate"]}
+    evals = by_name["supervisor_evaluate"]
+    assert gens and evals and by_name.get("judge") and by_name.get("tool_execute")
+
+    trace_id = format(episode.context.trace_id, "032x")
+    assert trace_id == Tracer.trace_id_for("ep-trace")  # deterministic per episode
+    assert all(s.context.trace_id == episode.context.trace_id for s in spans)
     for e in evals:
-        assert e["parent_run_id"] in gens, "supervisor_evaluate must be a child of an executor_generate run"
-    halted = [g for g in gens.values() if g.get("extra", {}).get("metadata", {}).get("intercepted")]
+        assert e.parent is not None and e.parent.span_id in gens, "evaluate must hang under executor_generate"
+    for g in gens.values():
+        assert g.parent.span_id == episode.context.span_id
+    halted = [g for g in gens.values() if _attr(g, "langfuse.observation.metadata.intercepted") in (True, "true")]
     assert len(halted) == 1
-    md = halted[0]["extra"]["metadata"]
-    assert md["cancel_latency_ms"] >= 0 and md["intended_violation"] is True
+    assert _attr(halted[0], "langfuse.observation.level") == "WARNING"
+
+    # both processes stamp the trace name + session, so the trace is named right whichever span lands first
+    for sp in (*evals, episode):
+        assert _attr(sp, "langfuse.trace.name") == "executor_episode"
+        assert _attr(sp, "session.id") == "exp-trace"
+
+    scores = lf.scores()
+    halts = [s for s in scores if s["name"] == "supervisor_halt" and s["value"] == 1]
+    assert len(halts) == 1 and halts[0]["observationId"] == format(halted[0].context.span_id, "016x")
+    assert {s["name"] for s in scores} >= {"supervisor_halt", "intercepted", "cancel_latency_ms", "violation"}
+
+
+async def test_tracer_disabled_is_noop():
+    t = Tracer(None)
+    with t.observation("x") as obs:
+        assert obs is None
+    assert t.context(None) is None
+    t.score("s", 1)
+    t.flush()
+
+
+async def test_tracer_propagates_body_exceptions(lf):
+    with pytest.raises(ValueError), lf.tracer.observation("boom"):
+        raise ValueError("x")
+    with pytest.raises(asyncio.CancelledError), lf.tracer.observation("cancel"):
+        raise asyncio.CancelledError()
+    assert {s.name for s in lf.spans()} >= {"boom", "cancel"}

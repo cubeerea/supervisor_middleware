@@ -15,6 +15,7 @@ from typing import Any
 from ..config import Settings, get_settings
 from ..redis_bus import AsyncRedisBus
 from ..telemetry import EventLog
+from ..tracing import Tracer
 from .graph import ExecutorDeps, build_graph
 from .interception import InterruptListener
 from .prompts import MIGRATION_TASK
@@ -50,7 +51,8 @@ class EpisodeResult:
 
 async def run_episode(settings: Settings, *, source: StreamSource, bus: AsyncRedisBus, events: EventLog,
                       workdir: Path, task: str = MIGRATION_TASK, thread_id: str | None = None,
-                      max_halts_per_step: int = 3) -> EpisodeResult:
+                      max_halts_per_step: int = 3, tracer: Tracer | None = None,
+                      session_id: str | None = None) -> EpisodeResult:
     from ..sandbox_runner import run_command
     from ..sandbox_verify import verify_db
 
@@ -58,20 +60,31 @@ async def run_episode(settings: Settings, *, source: StreamSource, bus: AsyncRed
     listener = InterruptListener(bus, settings.interrupt_channel, settings.ack_channel, events)
     deps = ExecutorDeps(settings=settings, source=source, bus=bus, listener=listener, events=events,
                         workdir=workdir, run_command=run_command, verify=verify_db,
-                        max_halts_per_step=max_halts_per_step)
+                        max_halts_per_step=max_halts_per_step, tracer=tracer or Tracer())
     graph = build_graph(deps)
     events.emit("episode_started", thread_id=thread_id, backend=source.name,
                 scenario=getattr(source, "scenario", None), model=settings.executor_model)
-    init = {"task": task, "thread_id": thread_id, "messages": [{"role": "user", "content": task}],
+    init = {"task": task, "thread_id": thread_id, "session_id": session_id,
+            "messages": [{"role": "user", "content": task}],
             "step": 0, "attempt": 0, "halts": [], "trajectory": []}
-    try:
-        final = await graph.ainvoke(init, config={"recursion_limit": 4 * settings.max_steps + 20,
-                                                   "run_name": "executor_episode",
-                                                   "metadata": {"thread_id": thread_id}})
-    finally:
-        await listener.stop()
-        await bus.flush()
-    v = verify_db(workdir / "app.db")
+    tr = deps.tracer
+    with tr.attributes(trace_name="executor_episode", session_id=session_id,
+                       tags=[source.name] + ([source.scenario] if hasattr(source, "scenario") else [])), \
+            tr.observation("executor_episode", as_type="agent", input={"task": task},
+                        trace_context={"trace_id": Tracer.trace_id_for(thread_id)} if tr.enabled else None,
+                        metadata={"thread_id": thread_id, "backend": source.name,
+                                  "scenario": getattr(source, "scenario", None),
+                                  "executor_model": settings.executor_model}) as ep:
+        try:
+            final = await graph.ainvoke(init, config={"recursion_limit": 4 * settings.max_steps + 20,
+                                                       "run_name": "executor_episode",
+                                                       "metadata": {"thread_id": thread_id}})
+        finally:
+            await listener.stop()
+            await bus.flush()
+        v = verify_db(workdir / "app.db")
+        tr.update(ep, output={"outcome": final.get("outcome"), "steps": final.get("step", 0),
+                              "halts": len(final.get("halts", [])), "verify": v})
     outcome = final.get("outcome") or ("max_steps" if final.get("step", 0) >= settings.max_steps else "stopped")
     events.emit("episode_finished", thread_id=thread_id, outcome=outcome, steps=final.get("step", 0),
                 halts=len(final.get("halts", [])), verify=v)
@@ -90,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     logging.basicConfig(level=a.log_level, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     settings = get_settings()
+    tracer = Tracer.from_settings(settings)
 
     async def _run() -> EpisodeResult:
         from ..sandbox_runner import prepare_workdir
@@ -100,9 +114,10 @@ def main(argv: list[str] | None = None) -> int:
         try:
             backend = resolve_backend(settings, a.backend)
             return await run_episode(settings, source=make_source(backend, a.scenario), bus=bus,
-                                     events=EventLog(settings.events_path), workdir=wd)
+                                     events=EventLog(settings.events_path), workdir=wd, tracer=tracer)
         finally:
             await bus.aclose()
+            tracer.flush()
 
     r = asyncio.run(_run())
     print(json.dumps({"thread_id": r.thread_id, "outcome": r.outcome, "steps": r.steps, "halts": r.halts,

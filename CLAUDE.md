@@ -19,7 +19,7 @@ in-flight Anthropic stream. Phase 5 measures True Intervention Rate and intercep
 
 ## Testing rules
 - Tests run offline: scripted executor streams, `fakeredis`, rule/scripted judges, temp dirs. Never call the real
-  Anthropic API, Ollama, LangSmith or a live Redis from tests.
+  Anthropic API, Ollama, Langfuse or a live Redis from tests (use `tests/tracing_fakes.py`).
 - Never write into `results/` or `sandbox/*.db` from tests; use `tmp_path`.
 
 ## Git workflow (every change)

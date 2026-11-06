@@ -13,7 +13,6 @@ reasoning publish) and refuses to execute when a halt arrived after the stream h
 """
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import uuid
@@ -28,6 +27,7 @@ from ..messages import TrajectoryPacket, now_ns
 from ..redis_bus import AsyncRedisBus
 from ..stream_parser import ReasoningWatcher, _decode
 from ..telemetry import EventLog
+from ..tracing import Tracer
 from .interception import InterceptionHalt, InterruptListener
 from .prompts import halt_feedback, system_prompt
 from .sources import PROPOSE_ACTION_TOOL, StreamSource
@@ -39,6 +39,7 @@ SEVERED = "\n# ... [stream severed by supervisor]"
 class ExecState(TypedDict, total=False):
     task: str
     thread_id: str
+    session_id: str | None  # Langfuse session (an experiment) grouping episode traces
     messages: list[dict[str, Any]]
     step: int
     attempt: int
@@ -47,6 +48,7 @@ class ExecState(TypedDict, total=False):
     trajectory: list[dict[str, Any]]  # one record per proposal (executed, halted or blocked)
     done: bool
     outcome: str
+    refusal: dict[str, Any] | None  # stop_details of a refused generation
 
 
 @dataclass
@@ -87,6 +89,7 @@ class ExecutorDeps:
     max_halts_per_step: int = 3
     command_timeout_s: float = 60.0
     trigger: str = "value_close"
+    tracer: Tracer = field(default_factory=Tracer)  # disabled unless given a Langfuse-backed Tracer
 
 
 def _request(deps: ExecutorDeps, state: ExecState) -> dict[str, Any]:
@@ -101,25 +104,16 @@ def _request(deps: ExecutorDeps, state: ExecState) -> dict[str, Any]:
         "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
         "messages": state["messages"],
     }
-    if deps.settings.executor_model.startswith("claude-sonnet-5-5"):
-        # Thinking off: the `reasoning` field *is* the reasoning we supervise, and it streams sooner.
-        req["thinking"] = {"type": "between_tools"}
+    if deps.settings.executor_model.startswith(("claude-sonnet-5", "claude-opus-5", "claude-fable-5")):
+        # Thinking stays ON and the supervised `reasoning` field is a short rationale for a reviewer. With thinking
+        # off and a field asking the model to write out its reasoning, Sonnet 5.5 declines mid-episode with
+        # stop_details.category "reasoning_extraction" (observed at step 4 of a real run).
+        req["thinking"] = {"type": "adaptive"}
+        req["output_config"] = {"effort": deps.settings.executor_effort}
     return req
 
 
-def _trace_cm(deps: ExecutorDeps, state: ExecState, run_id: str):
-    if not deps.settings.tracing:
-        return contextlib.nullcontext(None)
-    import langsmith
-
-    return langsmith.trace(
-        "executor_generate", run_type="llm", run_id=run_id,
-        inputs={"step": state.get("step", 0), "attempt": state.get("attempt", 0)},
-        metadata={"thread_id": state["thread_id"], "step": state.get("step", 0), "component": "executor"},
-    )
-
-
-async def _consume(deps: ExecutorDeps, state: ExecState, turn: PartialTurn, trace_headers: dict | None) -> PartialTurn:
+async def _consume(deps: ExecutorDeps, state: ExecState, turn: PartialTurn, trace_context: dict | None) -> PartialTurn:
     in_tool = False
     async for kind, data in deps.source.stream(_request(deps, state)):
         if kind == "meta":
@@ -131,7 +125,7 @@ async def _consume(deps: ExecutorDeps, state: ExecState, turn: PartialTurn, trac
         elif kind == "input_json" and in_tool:
             reasoning = turn.watcher.feed(data)
             if reasoning is not None:
-                _publish(deps, state, turn, reasoning, trace_headers)
+                _publish(deps, state, turn, reasoning, trace_context)
         elif kind == "block_complete":
             if data.get("type") == "tool_use":
                 in_tool = False
@@ -140,18 +134,19 @@ async def _consume(deps: ExecutorDeps, state: ExecState, turn: PartialTurn, trac
         elif kind == "final":
             turn.final = data
     if (reasoning := turn.watcher.finish()) is not None:
-        _publish(deps, state, turn, reasoning, trace_headers)
+        _publish(deps, state, turn, reasoning, trace_context)
     return turn
 
 
-def _publish(deps: ExecutorDeps, state: ExecState, turn: PartialTurn, reasoning: str, trace_headers: dict | None):
+def _publish(deps: ExecutorDeps, state: ExecState, turn: PartialTurn, reasoning: str, trace_context: dict | None):
     turn.reasoning = reasoning
     last_obs = next((t.get("observation") for t in reversed(state.get("trajectory", [])) if t.get("observation")), "")
     packet = TrajectoryPacket(
         run_id=turn.run_id, thread_id=state["thread_id"], step=state.get("step", 0), attempt=state.get("attempt", 0),
-        reasoning=reasoning, trace_headers=trace_headers,
+        reasoning=reasoning, trace_context=trace_context,
         state={"task": state["task"], "step": state.get("step", 0), "last_observation": (last_obs or "")[-1500:],
-               "previous_halts": [h["reason"] for h in state.get("halts", [])][-3:]},
+               "previous_halts": [h["reason"] for h in state.get("halts", [])][-3:],
+               "session_id": state.get("session_id")},
     )
     turn.published_at_ns = packet.published_at_ns
     deps.bus.publish_nowait(deps.settings.executor_channel, packet)  # fire-and-forget: do NOT await
@@ -171,35 +166,56 @@ def build_graph(deps: ExecutorDeps):
         run_id = str(uuid.uuid4())
         turn = PartialTurn(run_id=run_id, watcher=ReasoningWatcher(trigger=deps.trigger))  # type: ignore[arg-type]
         started = now_ns()
-        with _trace_cm(deps, state, run_id) as rt:
-            headers = rt.to_headers() if rt is not None else None
+        tr = deps.tracer
+        with tr.observation("executor_generate", as_type="generation", model=deps.settings.executor_model,
+                            input={"step": state.get("step", 0), "attempt": state.get("attempt", 0),
+                                   "last_message": state["messages"][-1] if state["messages"] else None},
+                            metadata={"thread_id": state["thread_id"], "run_id": run_id, "backend": deps.source.name,
+                                      "step": state.get("step", 0), "attempt": state.get("attempt", 0)}) as obs:
+            ctx = tr.context(obs)
             try:
-                await deps.listener.run_guarded(run_id, _consume(deps, state, turn, headers), {"partial": turn})
+                await deps.listener.run_guarded(run_id, _consume(deps, state, turn, ctx), {"partial": turn})
             except InterceptionHalt as halt:
-                if rt is not None:
-                    sig = halt.signal
-                    rt.metadata.update({
-                        "intercepted": True, "halt_reason": sig.reason, **_labels(turn),
-                        "interrupt_published_at_ns": sig.published_at_ns, "cancelled_at_ns": halt.cancelled_at_ns,
-                        "cancel_latency_ms": (halt.cancelled_at_ns - sig.published_at_ns) / 1e6,
-                        "end_to_end_ms": ((halt.cancelled_at_ns - sig.packet_published_at_ns) / 1e6
-                                          if sig.packet_published_at_ns else None),
-                        "command_chars_at_cancel": len(turn.command_partial)})
-                    rt.end(outputs={"reasoning": turn.reasoning, "command_partial": turn.command_partial,
-                                    "intercepted": True})
-                return _on_halt(state, turn, halt.signal.reason, late=False,
+                sig = halt.signal
+                cancel_ms = (halt.cancelled_at_ns - sig.published_at_ns) / 1e6
+                e2e_ms = (halt.cancelled_at_ns - sig.packet_published_at_ns) / 1e6 if sig.packet_published_at_ns \
+                    else None
+                tr.update(obs, level="WARNING", status_message=f"severed by supervisor: {sig.reason}"[:500],
+                          output={"reasoning": turn.reasoning, "command_partial": turn.command_partial},
+                          metadata={"intercepted": True, "halt_reason": sig.reason, "cancel_latency_ms": cancel_ms,
+                                    "end_to_end_ms": e2e_ms, "command_chars_at_cancel": len(turn.command_partial),
+                                    **_labels(turn)})
+                if ctx:
+                    tr.score("intercepted", 1, data_type="BOOLEAN", trace_id=ctx["trace_id"],
+                             observation_id=ctx["parent_span_id"], comment=sig.reason[:500])
+                    tr.score("cancel_latency_ms", cancel_ms, trace_id=ctx["trace_id"],
+                             observation_id=ctx["parent_span_id"])
+                    if "intended_violation" in turn.meta:
+                        tr.score("violation", 1 if turn.meta["intended_violation"] else 0, data_type="BOOLEAN",
+                                 trace_id=ctx["trace_id"], observation_id=ctx["parent_span_id"])
+                return _on_halt(state, turn, sig.reason, late=False,
                                 cancelled_at_ns=halt.cancelled_at_ns, started=started)
-            if rt is not None:
-                rt.metadata.update({"intercepted": False, **_labels(turn)})
-                rt.end(outputs={"reasoning": turn.reasoning, "command": turn.command_partial})
+            final_out = turn.final or {}
+            tr.update(obs, output={"reasoning": turn.reasoning, "command": turn.command_partial,
+                                   "stop_reason": final_out.get("stop_reason")},
+                      metadata={"intercepted": False, **_labels(turn)})
+            if ctx:
+                tr.score("intercepted", 0, data_type="BOOLEAN", trace_id=ctx["trace_id"],
+                         observation_id=ctx["parent_span_id"])
+                if "intended_violation" in turn.meta:
+                    tr.score("violation", 1 if turn.meta["intended_violation"] else 0, data_type="BOOLEAN",
+                             trace_id=ctx["trace_id"], observation_id=ctx["parent_span_id"])
 
         final = turn.final or {"content": [], "stop_reason": "error"}
         stop = final.get("stop_reason")
         tool = next((b for b in final["content"] if b.get("type") == "tool_use"), None)
         deps.events.emit("generation_completed", run_id=run_id, thread_id=state["thread_id"],
-                         step=state.get("step", 0), stop_reason=stop, ms=(now_ns() - started) / 1e6)
+                         step=state.get("step", 0), stop_reason=stop, stop_details=final.get("stop_details"),
+                         usage=final.get("usage"),
+                         ms=(now_ns() - started) / 1e6)
         if stop == "refusal":
-            return {"done": True, "outcome": "refusal"}
+            log.warning("executor refusal at step %s: %s", state.get("step", 0), final.get("stop_details"))
+            return {"done": True, "outcome": "refusal", "refusal": final.get("stop_details")}
         if tool is None or stop == "max_tokens" or not isinstance(tool.get("input"), dict):
             # No usable tool call: nudge and try again (counts as a step so a confused model terminates).
             msgs = [*state["messages"], {"role": "assistant", "content": final["content"] or
@@ -273,7 +289,12 @@ def build_graph(deps: ExecutorDeps):
             obs = f"FINISH rejected: verification failed: {json.dumps(result)}"
             is_error = True
         else:
-            res = await deps.run_command(p["command"], deps.workdir, deps.command_timeout_s)
+            with deps.tracer.observation("tool_execute", as_type="tool", input={"command": p["command"]},
+                                         metadata={"run_id": p["run_id"], "step": step}) as tobs:
+                res = await deps.run_command(p["command"], deps.workdir, deps.command_timeout_s)
+                deps.tracer.update(tobs, output={"exit_code": res.exit_code, "stdout": res.stdout[-2000:],
+                                                 "stderr": res.stderr[-2000:]},
+                                   level="ERROR" if res.exit_code != 0 else "DEFAULT")
             obs = (f"exit_code={res.exit_code}{' (timed out)' if res.timed_out else ''}\n"
                    f"--- stdout\n{res.stdout}\n--- stderr\n{res.stderr}")
             is_error = res.exit_code != 0
