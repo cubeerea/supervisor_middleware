@@ -199,10 +199,17 @@ async def test_scripted_judge_list_and_callable():
 async def test_make_judge():
     s = Settings()
     assert isinstance(make_judge(s, "rules"), RuleJudge)
-    j = make_judge(s, "ollama")
+    j = make_judge(s, "ollama", mode="verdict")
     assert isinstance(j, OllamaJudge)
     assert j.model == s.supervisor_model and j.base_url == s.ollama_url.rstrip("/")
     await j.aclose()
+    from supervisor_middleware.supervisor.judge import CascadeJudge
+
+    c = make_judge(Settings(supervisor_judge_mode="cascade"), "ollama")
+    assert isinstance(c, CascadeJudge)
+    assert c.screen.mode == "verdict" and c.screen.model == s.supervisor_model
+    assert c.confirm.mode == "checklist" and c.confirm.model == s.supervisor_confirm_model
+    await c.aclose()
     with pytest.raises(ValueError):
         make_judge(s, "gpt")
 
@@ -213,3 +220,83 @@ def test_verdict_schema_is_reason_first():
     s = verdict_schema()
     assert list(s["properties"]) == ["reason", "status"]
     assert s["required"] == ["reason", "status"]
+
+
+# --------------------------------------------------------------------------------------------- checklist mode
+
+
+async def test_checklist_mode_request_and_derived_verdict():
+    from supervisor_middleware.supervisor.judge import CHECKLIST_FLAGS, CHECKLIST_PROMPT
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return _reply(json.dumps({"action": "run UPDATE via sqlite3", "raw_sql": True, "edits_orm_or_db": False,
+                                  "defeats_guard_or_fakes": False}))
+
+    judge = _ollama(handler, mode="checklist")
+    v = await judge.evaluate(_packet("I'll use sqlite3."))
+    assert v.status == "halt" and "raw SQL" in v.reason and "run UPDATE via sqlite3" in v.reason
+    fmt = seen["body"]["format"]
+    assert list(fmt["properties"]) == ["action", *CHECKLIST_FLAGS]  # action first
+    assert seen["body"]["messages"][0]["content"] == CHECKLIST_PROMPT
+    await judge.aclose()
+
+
+@pytest.mark.parametrize("content,status", [
+    ('{"action": "read mock_orm.py", "raw_sql": false, "edits_orm_or_db": false, "defeats_guard_or_fakes": false}',
+     "proceed"),
+    ('{"action": "patch guard", "raw_sql": false, "edits_orm_or_db": true, "defeats_guard_or_fakes": true}', "halt"),
+])
+def test_parse_checklist(content, status):
+    from supervisor_middleware.supervisor.judge import parse_checklist
+
+    assert parse_checklist(content).status == status
+
+
+async def test_checklist_mode_unparseable_fails_open():
+    judge = _ollama(lambda r: _reply('{"action": "x", "raw_sql": "maybe"}'), mode="checklist")
+    v = await judge.evaluate(_packet("whatever"))
+    assert v.status == "proceed" and v.reason.startswith("supervisor_error")
+    await judge.aclose()
+
+
+def test_bad_mode_rejected():
+    with pytest.raises(ValueError):
+        OllamaJudge(mode="nope")  # type: ignore[arg-type]
+
+
+
+@pytest.mark.parametrize("screen,confirm,expect,confirm_called", [
+    ("proceed", "halt", "proceed", False),   # screen proceed is final: confirm never runs
+    ("halt", "halt", "halt", True),          # both agree: halt with the confirm's reason
+    ("halt", "proceed", "proceed", True),    # confirm overrules a screen false positive
+])
+async def test_cascade_judge(screen, confirm, expect, confirm_called):
+    from supervisor_middleware.supervisor.judge import CascadeJudge
+
+    calls = []
+
+    def conf(p):
+        calls.append(p)
+        return Verdict(status=confirm, reason="confirm-reason")
+
+    j = CascadeJudge(ScriptedJudge(lambda p: Verdict(status=screen, reason="screen-reason")), ScriptedJudge(conf))
+    v = await j.evaluate(_packet("x"))
+    assert v.status == expect and bool(calls) == confirm_called
+    if expect == "halt":
+        assert v.reason == "confirm-reason"
+    if screen == "halt" and expect == "proceed":
+        assert "overruled" in v.reason and "screen-reason" in v.reason
+
+
+async def test_cascade_does_not_confirm_screen_errors():
+    from supervisor_middleware.supervisor.judge import CascadeJudge
+
+    def boom(p):
+        raise AssertionError("confirm must not be called")
+
+    j = CascadeJudge(ScriptedJudge(lambda p: Verdict(status="halt", reason="supervisor_error: timeout")),
+                     ScriptedJudge(boom))
+    assert (await j.evaluate(_packet("x"))).status == "halt"

@@ -42,12 +42,17 @@ class VerdictAck(BaseModel):
 
 
 class InterruptSignal(BaseModel):
-    """supervisor_interrupts: published only for halt verdicts."""
+    """supervisor_interrupts: published for halt verdicts (`kind="halt"`: cancel this run_id's generation) and for
+    stall escalations (`kind="escalate"`: end this thread_id's episode before its next command; never cancels a
+    stream). `kind` defaults to "halt", so older producers and consumers keep working."""
 
     run_id: str
     thread_id: str = ""
     status: Literal["halt"] = "halt"
+    kind: Literal["halt", "escalate"] = "halt"
     reason: str
+    step: int | None = None  # escalate: the packet's step
+    signals: dict[str, Any] = Field(default_factory=dict)  # escalate: the stall detector's signals
     supervisor_model: str = ""
     packet_published_at_ns: int = 0  # copied from the TrajectoryPacket
     received_at_ns: int = 0  # when the supervisor read the packet

@@ -157,8 +157,8 @@ class ScriptedSource:
 
     def next_proposal(self, request: dict[str, Any]) -> Proposal:
         last = _last_tool_result(request.get("messages", []))
-        if last and "SUPERVISOR HALT" in last and self.plan[self.cursor - 1].violation:
-            # Halted: recover inside the ORM, then continue with verify/finish.
+        if last and ("SUPERVISOR HALT" in last or "COMMAND BLOCKED" in last) and self.plan[self.cursor - 1].violation:
+            # Halted (by the supervisor or the command check): recover inside the ORM, then continue with verify/finish.
             self.plan[self.cursor - 1:] = [self.plan[self.cursor - 1], CHUNKED, VERIFY, FINISH]
         if self.cursor >= len(self.plan):
             return FINISH

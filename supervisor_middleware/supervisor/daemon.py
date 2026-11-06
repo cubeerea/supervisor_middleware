@@ -6,6 +6,10 @@ packet. Every evaluation is a Langfuse `supervisor_evaluate` observation attache
 `executor_generate` observation via the packet's `trace_context` (distributed tracing), with the Qwen call as a
 child `judge` generation and a `supervisor_halt` score on the executor's generation. When tracing is off nothing
 touches Langfuse at all.
+
+Besides judging, every packet feeds a per-thread `StallDetector` (stall.py, deterministic, no model). When an episode
+stops making progress the daemon publishes, once per thread, an `InterruptSignal(kind="escalate")` that ends the
+episode before its next command, logs `stall_escalated`, and records a `stall_detected` score.
 """
 from __future__ import annotations
 
@@ -26,6 +30,7 @@ from ..redis_bus import AsyncRedisBus
 from ..telemetry import EventLog
 from ..tracing import Tracer
 from .judge import Judge, make_judge
+from .stall import StallResult, StallTracker
 
 log = logging.getLogger("supervisor")
 
@@ -60,10 +65,12 @@ class SupervisorDaemon:
         self.ready = asyncio.Event()
         self._sem = asyncio.Semaphore(max_concurrency)
         self._tasks: set[asyncio.Task] = set()
+        self.stalls = StallTracker(settings.stall_window) if settings.stall_detection else None
 
     # ------------------------------------------------------------------ evaluation (+ Langfuse)
 
-    async def _evaluate(self, packet: TrajectoryPacket, transit_ms: float) -> tuple[Verdict, float]:
+    async def _evaluate(self, packet: TrajectoryPacket, transit_ms: float,
+                        stall: StallResult | None = None) -> tuple[Verdict, float]:
         tr = self.tracer
         if not tr.enabled:
             return await _run_judge(self.judge, packet)
@@ -71,6 +78,9 @@ class SupervisorDaemon:
         metadata = {"executor_run_id": packet.run_id, "thread_id": packet.thread_id, "step": packet.step,
                     "attempt": packet.attempt, "transit_ms": round(transit_ms, 3), "supervisor_model": model,
                     "judge": self.judge.name}
+        if stall is not None:
+            metadata.update(stall_step_stalled=stall.stalled_step, stall_detected=stall.fired,
+                            stall_signals=stall.signals)
         # trace_context = the executor's executor_generate observation: this becomes its child, in its trace.
         with tr.attributes(trace_name="executor_episode", session_id=packet.state.get("session_id")), \
                 tr.observation("supervisor_evaluate", as_type="evaluator", trace_context=packet.trace_context,
@@ -87,7 +97,41 @@ class SupervisorDaemon:
             tr.score("supervisor_halt", 1 if verdict.status == "halt" else 0, data_type="BOOLEAN",
                      trace_id=packet.trace_context["trace_id"],
                      observation_id=packet.trace_context.get("parent_span_id"), comment=verdict.reason[:500])
+            if stall is not None and stall.fired:
+                tr.score("stall_detected", 1, data_type="BOOLEAN", trace_id=packet.trace_context["trace_id"],
+                         observation_id=packet.trace_context.get("parent_span_id"), comment=stall.reason[:500])
         return verdict, judge_ms
+
+    # ------------------------------------------------------------------ stall escalation
+
+    async def _check_stall(self, packet: TrajectoryPacket, received_at_ns: int) -> StallResult | None:
+        """Feed the packet to its thread's stall detector; on the (single) firing, publish an escalation. Runs before
+        the judge so the escalation reaches the executor ahead of this packet's proceed ack."""
+        if self.stalls is None:
+            return None
+        try:
+            res = self.stalls.observe(packet)
+        except Exception:  # noqa: BLE001 - stall detection must never break judging
+            log.exception("stall detector failed on run %s", packet.run_id)
+            return None
+        if not res.fired:
+            return res
+        log.warning("%s stall at step %s: %s", packet.thread_id, packet.step, res.reason)
+        self.events.emit("stall_escalated", run_id=packet.run_id, thread_id=packet.thread_id, step=packet.step,
+                         attempt=packet.attempt, reason=res.reason, signals=res.signals)
+        sig = InterruptSignal(run_id=packet.run_id, thread_id=packet.thread_id, kind="escalate", reason=res.reason,
+                              step=packet.step, signals=res.signals, supervisor_model="stall_detector",
+                              packet_published_at_ns=packet.published_at_ns, received_at_ns=received_at_ns,
+                              verdict_at_ns=now_ns())
+        try:
+            receivers = await self.bus.publish(self.settings.interrupt_channel, sig)
+        except Exception:  # noqa: BLE001
+            log.exception("failed to publish escalation for thread %s", packet.thread_id)
+            self.events.emit("escalation_publish_failed", run_id=packet.run_id, thread_id=packet.thread_id)
+        else:
+            self.events.emit("escalation_published", run_id=packet.run_id, thread_id=packet.thread_id,
+                             step=packet.step, published_at_ns=sig.published_at_ns, receivers=receivers)
+        return res
 
     # ------------------------------------------------------------------ one packet
 
@@ -98,7 +142,8 @@ class SupervisorDaemon:
                          attempt=packet.attempt, packet_published_at_ns=packet.published_at_ns,
                          received_at_ns=received_at_ns, transit_ms=round(transit_ms, 3))
 
-        verdict, judge_ms = await self._evaluate(packet, transit_ms)
+        stall = await self._check_stall(packet, received_at_ns)
+        verdict, judge_ms = await self._evaluate(packet, transit_ms, stall)
         verdict_at_ns = now_ns()
         model = _judge_model(self.judge)
         self.events.emit("supervisor_verdict", run_id=packet.run_id, thread_id=packet.thread_id, step=packet.step,
