@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""3x2 supervisor matrix: what the supervisor sees (context) x who the supervisor is (model).
+"""Supervisor matrix: what the supervisor sees (context), for a hosted supervisor model.
 
     context     reasoning   rationale + last observation, published when `reasoning` closes; may cut the stream
                 action      rationale + finished command; the tool gate blocks until the verdict
                 trajectory  action + every earlier step of the episode
-    supervisor  qwen        local Ollama cascade (qwen2.5:3b screen -> qwen2.5-coder:7b confirm), as in v2
-                openrouter  one hosted model (--openrouter-model)
+    supervisor  openrouter  one hosted model (--openrouter-model); the default
+                qwen        local Ollama cascade (qwen2.5:3b screen -> qwen2.5-coder:7b confirm), opt-in with
+                            --supervisors qwen,openrouter. Off by default: the v1/v2 runs already cover it
 
 Every cell runs the same executor and scenarios with the command check and the stall detector OFF, so the numbers
 measure the judge alone. Each cell is a `run_experiment.py` subprocess (inline daemon, in-memory Redis); results land
@@ -27,6 +28,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 CONTEXTS = ("reasoning", "action", "trajectory")
 SUPERVISORS = ("qwen", "openrouter")
+DEFAULT_SUPERVISORS = ("openrouter",)
 
 
 def cell_name(name: str, context: str, supervisor: str) -> str:
@@ -109,7 +111,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--backend", choices=["scripted", "anthropic"], default="scripted")
     ap.add_argument("--scenarios", help="comma list for the scripted backend (default: all)")
     ap.add_argument("--contexts", default=",".join(CONTEXTS))
-    ap.add_argument("--supervisors", default=",".join(SUPERVISORS))
+    ap.add_argument("--supervisors", default=",".join(DEFAULT_SUPERVISORS),
+                    help=f"comma list of {','.join(SUPERVISORS)} (default: openrouter only)")
     ap.add_argument("--openrouter-model", default="qwen/qwen3.8-max-0902")
     ap.add_argument("--reasoning-effort", default=None, help="OpenRouter reasoning effort ('' = provider default)")
     ap.add_argument("--num-ctx", type=int, default=16384, help="Ollama context window for the qwen cells")

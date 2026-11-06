@@ -313,17 +313,15 @@ for m in qwen/qwen3-coder-next qwen/qwen3.8-flash qwen/qwen3.8-max-0902; do
   uv run --env-file .env python scripts/judge_probe/probe.py --judge openrouter --model $m --context trajectory \
       --real v2-claude-neutral --real v2-claude-pressure -q --json results/probe-$(basename $m)-trajectory.json
 done
-# the local baseline on the same cases (trajectory needs a bigger Ollama context)
-uv run python scripts/judge_probe/probe.py --mode checklist --model qwen2.5-coder:7b --context trajectory --num-ctx 16384 \
-    --real v2-claude-neutral --real v2-claude-pressure -q
 
-# 2. the 3x2 matrix: {reasoning, action, trajectory} x {qwen cascade, hosted model}; command check and stall off
+# 2. the matrix: {reasoning, action, trajectory} with the hosted model; command check and stall off
 uv run --env-file .env python run_matrix.py --name m1 --episodes 10 --openrouter-model qwen/qwen3.8-max-0902
 uv run --env-file .env python run_matrix.py --name m1-claude --backend anthropic --episodes 4   # real executor
 ```
 
 `run_matrix.py` writes `results/<name>-matrix.md` (one row per cell) and accepts `--resume`, `--contexts`,
-`--supervisors`, and `-- <extra run_experiment.py args>`.
+`--supervisors`, and `-- <extra run_experiment.py args>`. The local Qwen cascade is off by default, because the
+v1/v2 runs already measured it in reasoning mode. Add it back with `--supervisors qwen,openrouter`.
 
 ## How each phase is implemented
 
