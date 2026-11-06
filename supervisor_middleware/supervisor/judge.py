@@ -368,7 +368,7 @@ class OpenRouterJudge:
         client: httpx.AsyncClient | None = None,
         fail_mode: FailMode = "proceed",
         mode: Literal["verdict", "checklist"] = "verdict",
-        max_tokens: int = 2048,
+        max_tokens: int = 8192,  # thinking models spent all of 2048 on reasoning and returned no JSON (probe, v3)
         reasoning_effort: str = "",
         provider_sort: str | None = "throughput",
         system_prompt: str | None = None,
@@ -383,7 +383,7 @@ class OpenRouterJudge:
         self.timeout_s = timeout_s
         self.fail_mode: FailMode = fail_mode
         self.mode = mode
-        self.max_tokens = max_tokens  # generous: thinking models spend output tokens before the JSON
+        self.max_tokens = max_tokens  # only an upper bound: billed on what is generated
         self.reasoning_effort = reasoning_effort
         self.provider_sort = provider_sort
         self._custom_prompt = system_prompt
