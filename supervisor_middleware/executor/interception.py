@@ -162,6 +162,25 @@ class InterruptListener:
     def late_halt(self, run_id: str) -> InterruptSignal | None:
         return self._late.get(run_id)
 
+    async def wait_for_verdict(self, run_id: str, timeout_s: float) -> tuple[InterruptSignal | None, bool]:
+        """Action-mode gate: block until the supervisor answers for `run_id` (halt or proceed ack) or `timeout_s`
+        passes. Returns (halt signal or None, answered). A halt or ack that arrived before the call counts."""
+        if sig := self._late.get(run_id):
+            return sig, True
+        if run_id in self._acked:
+            self._acked.discard(run_id)
+            return None, True
+        ev = self._waiters.setdefault(run_id, asyncio.Event())
+        try:
+            await asyncio.wait_for(ev.wait(), timeout=timeout_s)
+        except TimeoutError:
+            pass
+        finally:
+            self._waiters.pop(run_id, None)
+        answered = run_id in self._acked or run_id in self._late
+        self._acked.discard(run_id)
+        return self._late.get(run_id), answered
+
     async def wait_for_late_halt(self, run_id: str, until_ns: int) -> InterruptSignal | None:
         """Tool gate: wait until `until_ns` (wall clock) for a halt on a stream that already finished. Returns early
         (None) once the supervisor has acknowledged a proceed verdict for this run."""

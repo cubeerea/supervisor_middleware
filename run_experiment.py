@@ -59,7 +59,9 @@ async def supervisor(mode: str, judge: str, settings, events: EventLog):
                "STALL_DETECTION": "true" if settings.stall_detection else "false",
                "STALL_WINDOW": str(settings.stall_window), "SUPERVISOR_MODEL": settings.supervisor_model,
                "SUPERVISOR_CONFIRM_MODEL": settings.supervisor_confirm_model,
-               "SUPERVISOR_JUDGE_MODE": settings.supervisor_judge_mode}
+               "SUPERVISOR_JUDGE_MODE": settings.supervisor_judge_mode, "OPENROUTER_MODEL": settings.openrouter_model,
+               "OPENROUTER_REASONING_EFFORT": settings.openrouter_reasoning_effort,
+               "SUPERVISOR_NUM_CTX": str(settings.supervisor_num_ctx)}
         proc = subprocess.Popen(  # noqa: ASYNC220 - Popen returns immediately; we never block on it here
             [sys.executable, str(ROOT / "supervisor_daemon.py"), "--backend", judge],
             env=env, cwd=ROOT)
@@ -129,7 +131,13 @@ async def main_async(a: argparse.Namespace) -> int:
     if a.no_command_check:
         overrides["command_check"] = False
     if a.supervisor_model:
-        overrides["supervisor_model"] = a.supervisor_model
+        overrides["openrouter_model" if a.judge == "openrouter" else "supervisor_model"] = a.supervisor_model
+    if a.supervision_mode:
+        overrides["supervision_mode"] = a.supervision_mode
+    if a.num_ctx is not None:
+        overrides["supervisor_num_ctx"] = a.num_ctx
+    if a.reasoning_effort is not None:
+        overrides["openrouter_reasoning_effort"] = a.reasoning_effort
     if a.confirm_model:
         overrides["supervisor_confirm_model"] = a.confirm_model
     if a.judge_mode:
@@ -144,7 +152,8 @@ async def main_async(a: argparse.Namespace) -> int:
     scenarios = a.scenarios.split(",") if a.scenarios else list(SCENARIOS)
     events = EventLog(settings.events_path)
     print(f"[{exp}] executor={backend} ({settings.executor_model if backend == 'anthropic' else 'scripted'}) "
-          f"supervisor={a.supervisor}/{a.judge} redis={settings.redis_url} episodes={a.episodes} "
+          f"supervisor={a.supervisor}/{a.judge} mode={settings.supervision_mode} redis={settings.redis_url} "
+          f"episodes={a.episodes} "
           f"stall_detection={'on (window ' + str(settings.stall_window) + ')' if settings.stall_detection else 'off'}"
           + (" (external daemon: set STALL_DETECTION there)" if a.supervisor == "external" else "")
           + f" command_check={'on' if settings.command_check else 'off'}", flush=True)
@@ -189,10 +198,11 @@ async def main_async(a: argparse.Namespace) -> int:
     m["executor_cost_usd"] = estimate_cost(settings.executor_model, tok) if backend == "anthropic" else None
     m["refusals"] = sum(r.outcome == "refusal" for r in results)
     m.update(pressure=a.pressure, stall_detection=settings.stall_detection, command_check=settings.command_check,
-             max_steps=settings.max_steps)
+             max_steps=settings.max_steps, supervision_mode=settings.supervision_mode)
     m.update(experiment=exp, executor_backend=backend, judge=a.judge, supervisor_mode=a.supervisor,
              executor_model=settings.executor_model if backend == "anthropic" else "scripted",
-             supervisor_model=settings.supervisor_model if a.judge == "ollama" else a.judge,
+             supervisor_model={"ollama": settings.supervisor_model,
+                               "openrouter": settings.openrouter_model}.get(a.judge, a.judge),
              judge_mode=settings.supervisor_judge_mode if a.judge == "ollama" else None,
              confirm_model=settings.supervisor_confirm_model
              if a.judge == "ollama" and settings.supervisor_judge_mode == "cascade" else None)
@@ -236,10 +246,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--backend", choices=["auto", "anthropic", "scripted"], default=None)
     ap.add_argument("--scenarios", help=f"comma list for the scripted backend (default: all of {','.join(SCENARIOS)})")
     ap.add_argument("--supervisor", choices=["spawn", "inline", "external"], default="spawn")
-    ap.add_argument("--judge", choices=["ollama", "rules"], default="ollama")
+    ap.add_argument("--judge", choices=["ollama", "openrouter", "rules"], default="ollama")
+    ap.add_argument("--supervision-mode", choices=["reasoning", "action", "trajectory"],
+                    help="what the supervisor judges: the reasoning as soon as it closes (mid-stream kill), the "
+                         "finished action (blocking gate), or the action plus the whole episode so far "
+                         "(default SUPERVISION_MODE, 'reasoning')")
+    ap.add_argument("--num-ctx", type=int, help="Ollama judge context window (default SUPERVISOR_NUM_CTX)")
+    ap.add_argument("--reasoning-effort", help="OpenRouter judge reasoning effort (default "
+                                               "OPENROUTER_REASONING_EFFORT, '' = provider default)")
     ap.add_argument("--judge-mode", choices=["verdict", "checklist", "cascade"],
                     help="Ollama judge output mode (default SUPERVISOR_JUDGE_MODE)")
-    ap.add_argument("--supervisor-model", help="Ollama model for the judge (default SUPERVISOR_MODEL)")
+    ap.add_argument("--supervisor-model", help="judge model: an Ollama tag (default SUPERVISOR_MODEL) or, with "
+                                               "--judge openrouter, an OpenRouter id (default OPENROUTER_MODEL)")
     ap.add_argument("--confirm-model", help="Ollama model that re-checks halts in cascade mode "
                                            "(default SUPERVISOR_CONFIRM_MODEL)")
     ap.add_argument("--redis-url")

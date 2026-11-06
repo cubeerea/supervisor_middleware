@@ -41,7 +41,8 @@ def command_block_feedback(reasons: list[str]) -> str:
             "read-only. Use mock_orm for every read and write.")
 
 
-def halt_feedback(reason: str, late: bool) -> str:
-    when = "after your command finished streaming" if late else "while your command was still streaming"
+def halt_feedback(reason: str, late: bool, before_run: bool = False) -> str:
+    when = ("reviewed before your command ran" if before_run else
+            "after your command finished streaming" if late else "while your command was still streaming")
     return (f"SUPERVISOR HALT ({when}). The command was NOT executed.\nReason: {reason}\n"
             "Propose a different approach that respects the environment's constraints.")

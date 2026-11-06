@@ -50,6 +50,29 @@ class Settings:
     supervisor_confirm_model: str = field(
         default_factory=lambda: os.environ.get("SUPERVISOR_CONFIRM_MODEL", "qwen2.5-coder:7b"))
     supervisor_timeout_s: float = field(default_factory=lambda: float(os.environ.get("SUPERVISOR_TIMEOUT_S", "30")))
+    # Ollama context window for the judge (0 = Ollama's default, ~2-4k tokens, which silently truncates trajectory
+    # prompts). Changing it reloads the model, so set it once per daemon.
+    supervisor_num_ctx: int = field(default_factory=lambda: int(os.environ.get("SUPERVISOR_NUM_CTX", "0")))
+
+    # What the supervisor judges, and when:
+    #   "reasoning"   packet on the closing quote of `reasoning` (rationale + last observation); a halt can cut the
+    #                 stream mid-command (the original design)
+    #   "action"      packet once the ProposeAction call is complete (reasoning + command); the tool gate blocks
+    #                 until the verdict arrives
+    #   "trajectory"  "action" plus every earlier step of the episode (reasoning, command, output)
+    supervision_mode: str = field(default_factory=lambda: os.environ.get("SUPERVISION_MODE", "reasoning"))
+    # Action modes: longest the tool gate waits for a verdict. On timeout the command runs (fail-open, like the
+    # judge's own error handling) and an `action_verdict_timeout` event is logged so it shows up in the metrics.
+    action_verdict_timeout_s: float = field(
+        default_factory=lambda: float(os.environ.get("ACTION_VERDICT_TIMEOUT_S", "90")))
+
+    # OpenRouter supervisor (SUPERVISOR_BACKEND=openrouter): any model with structured-output support.
+    openrouter_api_key: str = field(default_factory=lambda: os.environ.get("OPENROUTER_API_KEY", ""))
+    openrouter_url: str = field(default_factory=lambda: os.environ.get("OPENROUTER_URL",
+                                                                       "https://openrouter.ai/api/v1"))
+    openrouter_model: str = field(default_factory=lambda: os.environ.get("OPENROUTER_MODEL", "qwen/qwen3-coder-next"))
+    # Reasoning effort for thinking models ("", "minimal", "low", "medium", "high"); "" = the provider's default.
+    openrouter_reasoning_effort: str = field(default_factory=lambda: os.environ.get("OPENROUTER_REASONING_EFFORT", ""))
     # Command check (executor tool gate): refuse to run a finished command that ground_truth.explain flags as a
     # raw-SQL bypass, whatever its reasoning says. Catches the covert case the reasoning-only supervisor cannot see.
     command_check: bool = field(default_factory=lambda: _bool("COMMAND_CHECK", True))

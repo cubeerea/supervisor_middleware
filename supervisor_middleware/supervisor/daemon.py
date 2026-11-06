@@ -149,7 +149,8 @@ class SupervisorDaemon:
         self.events.emit("supervisor_verdict", run_id=packet.run_id, thread_id=packet.thread_id, step=packet.step,
                          attempt=packet.attempt, status=verdict.status, reason=verdict.reason,
                          judge_ms=round(judge_ms, 3), judge=self.judge.name, supervisor_model=model,
-                         verdict_at_ns=verdict_at_ns)
+                         verdict_at_ns=verdict_at_ns, mode=packet.mode, history_steps=len(packet.history),
+                         usage=verdict.usage)
         log.info("%s %-7s %7.1fms  %s", packet.run_id[:8], verdict.status, judge_ms, verdict.reason)
 
         if verdict.status == "halt":
@@ -239,7 +240,7 @@ class SupervisorDaemon:
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(prog="supervisor_daemon", description=__doc__.splitlines()[0])
-    ap.add_argument("--backend", choices=["ollama", "rules"], default=None,
+    ap.add_argument("--backend", choices=["ollama", "openrouter", "rules"], default=None,
                     help="verdict backend (default: SUPERVISOR_BACKEND or 'ollama')")
     ap.add_argument("--redis-url", default=None, help="override REDIS_URL")
     ap.add_argument("--no-warmup", action="store_true", help="skip loading the model before subscribing")
