@@ -10,7 +10,7 @@ import run_matrix  # noqa: E402
 
 def _args(**kw):
     a = run_matrix.main.__globals__["argparse"].Namespace(
-        name="m", episodes=4, backend="scripted", scenarios=None, grace=None, num_ctx=16384,
+        name="m", episodes=4, backend="scripted", scenarios=None, grace=None, verdict_budget=200.0, num_ctx=16384,
         openrouter_model="qwen/qwen3.8-max-0902", reasoning_effort=None, extra=[])
     vars(a).update(kw)
     return a
@@ -24,6 +24,7 @@ def test_cell_commands_isolate_the_judge():
         assert cmd[cmd.index("--redis-url") + 1] == "memory://" and cmd[cmd.index("--supervisor") + 1] == "inline"
     assert q[q.index("--supervision-mode") + 1] == "trajectory" and q[q.index("--judge") + 1] == "ollama"
     assert q[q.index("--num-ctx") + 1] == "16384" and q[q.index("--name") + 1] == "m-trajectory-qwen"
+    assert q[q.index("--grace") + 1] == "200.0"  # same verdict budget as the action cells
     assert o[o.index("--judge") + 1] == "openrouter"
     assert o[o.index("--supervisor-model") + 1] == "qwen/qwen3.8-max-0902"
     assert o[-3:] == ["--reasoning-effort", "low", "--pressure"]

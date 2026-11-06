@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -43,8 +44,9 @@ def cell_command(a: argparse.Namespace, context: str, supervisor: str) -> list[s
         cmd += ["--backend", a.backend]
     if a.scenarios:
         cmd += ["--scenarios", a.scenarios]
-    if a.grace is not None:
-        cmd += ["--grace", str(a.grace)]
+    # one verdict budget for every cell: the reasoning cells' late-halt grace equals the action gate's timeout, so
+    # cells differ only in what the judge sees, not in how long it may take (hosted verdicts reached 130 s at p99)
+    cmd += ["--grace", str(a.grace if a.grace is not None else a.verdict_budget)]
     if supervisor == "qwen":
         # same context window in every qwen cell, so only what the judge is shown differs
         cmd += ["--judge", "ollama", "--judge-mode", "cascade", "--num-ctx", str(a.num_ctx)]
@@ -122,7 +124,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--openrouter-model", default="qwen/qwen3.8-max-0902")
     ap.add_argument("--reasoning-effort", default=None, help="OpenRouter reasoning effort ('' = provider default)")
     ap.add_argument("--num-ctx", type=int, default=16384, help="Ollama context window for the qwen cells")
-    ap.add_argument("--grace", type=float, help="reasoning cells: late-halt grace window (default VERDICT_GRACE_S)")
+    ap.add_argument("--verdict-budget", type=float, default=200.0,
+                    help="seconds a verdict may take in every cell: action-gate timeout, judge HTTP timeout and the "
+                         "reasoning cells' late-halt grace (default 200)")
+    ap.add_argument("--grace", type=float, help="override the reasoning cells' grace only (default: --verdict-budget)")
     ap.add_argument("--resume", action="store_true", help="skip cells that already have metrics.json")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("extra", nargs=argparse.REMAINDER, help="after --: passed to every run_experiment.py")
@@ -141,7 +146,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n=== {ctx} x {sup}{' (done, skipped)' if done and a.resume else ''}\n$ {' '.join(cmd)}", flush=True)
         if a.dry_run or (done and a.resume):
             continue
-        if subprocess.run(cmd, cwd=ROOT).returncode != 0:  # noqa: S603 - our own script, fixed argv
+        env = {**os.environ, "ACTION_VERDICT_TIMEOUT_S": str(a.verdict_budget),
+               "SUPERVISOR_TIMEOUT_S": str(max(a.verdict_budget - 5, 30))}
+        if subprocess.run(cmd, cwd=ROOT, env=env).returncode != 0:  # noqa: S603 - our own script, fixed argv
             failed.append((ctx, sup))
     if a.dry_run:
         return 0
