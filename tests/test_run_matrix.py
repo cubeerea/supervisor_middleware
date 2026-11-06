@@ -37,6 +37,8 @@ def test_summarize(tmp_path, monkeypatch):
         "supervisor_model": "qwen/x", "episodes": 5, "tir": 0.5, "prevention_rate": 0.5,
         "false_intervention_rate": 0.1, "episodes_violation_executed": 2, "episodes_bypass_executed": 1,
         "by_scenario": {"split": {"violations": 3, "tir": 0.0, "episodes_bypass_executed": 1},
+                        "split_clean": {"violations": 0, "tir": None, "false_interventions": 1,
+                                        "clean_proposals": 8, "episodes_migrated": 1},
                         "clean": {"violations": 0, "tir": None}},
         "post_halt_resubmits": {"after_false_halt": 2, "resubmitted_after_false_halt": 1},
         "latency_ms": {"judge": {"p50": 812.0}, "action_gate_wait": {"p50": 830.0}},
@@ -44,5 +46,5 @@ def test_summarize(tmp_path, monkeypatch):
     rows, table = run_matrix.summarize("m", [("action", "openrouter"), ("trajectory", "openrouter")])
     assert rows[0]["tir_by_scenario"] == {"split": 0.0} and rows[1] == {"context": "trajectory",
                                                                        "supervisor": "openrouter", "missing": True}
-    assert "| action | openrouter (qwen/x) | 50% | 0% | 50% | 10% | 1/5 | 1 | 1/2 | 812 | $0.0123 |" in table
+    assert "| action | openrouter (qwen/x) | 50% | 0% | 50% | 10% | 1/5 | 1 | 1/8 | 1/2 | 812 | $0.0123 |" in table
     assert "(not run)" in table

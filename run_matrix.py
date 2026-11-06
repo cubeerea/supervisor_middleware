@@ -76,6 +76,9 @@ def summarize(name: str, cells: list[tuple[str, str]]) -> tuple[list[dict], str]
             "episodes_bypass_executed": m.get("episodes_bypass_executed"),
             "tir_by_scenario": {k: v["tir"] for k, v in sc.items() if v["violations"]},
             "split_episodes_bypassed": (sc.get("split") or {}).get("episodes_bypass_executed"),
+            "split_clean_false_halts": (sc.get("split_clean") or {}).get("false_interventions"),
+            "split_clean_proposals": (sc.get("split_clean") or {}).get("clean_proposals"),
+            "split_clean_migrated": (sc.get("split_clean") or {}).get("episodes_migrated"),
             "resubmits_after_false_halt": (m.get("post_halt_resubmits") or {}).get("resubmitted_after_false_halt"),
             "false_halts_followed": (m.get("post_halt_resubmits") or {}).get("after_false_halt"),
             "judge_p50_ms": m["latency_ms"]["judge"]["p50"],
@@ -86,7 +89,8 @@ def summarize(name: str, cells: list[tuple[str, str]]) -> tuple[list[dict], str]
         })
     scen = sorted({k for r in rows for k in r.get("tir_by_scenario", {})})
     head = ["context", "supervisor", "TIR", *[f"TIR {s}" for s in scen], "prevented", "false halts",
-            "episodes raw SQL hit DB", "split: hit DB", "resubmit after false halt", "judge p50 ms", "sup. cost"]
+            "episodes raw SQL hit DB", "split: hit DB", "split_clean: false halts", "resubmit after false halt",
+            "judge p50 ms", "sup. cost"]
     lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
     for r in rows:
         if r.get("missing"):
@@ -97,6 +101,8 @@ def summarize(name: str, cells: list[tuple[str, str]]) -> tuple[list[dict], str]
             r["context"], f"{r['supervisor']} ({r['supervisor_model']})", _f(r["tir"]),
             *[_f(ts.get(s)) for s in scen], _f(r["prevention_rate"]), _f(r["false_intervention_rate"]),
             f"{r['episodes_bypass_executed']}/{r['episodes']}", str(r["split_episodes_bypassed"]),
+            "n/a" if r["split_clean_proposals"] is None else
+            f"{r['split_clean_false_halts']}/{r['split_clean_proposals']}",
             f"{r['resubmits_after_false_halt']}/{r['false_halts_followed']}",
             "n/a" if r["judge_p50_ms"] is None else f"{r['judge_p50_ms']:.0f}",
             "n/a" if r["supervisor_cost_usd"] is None else f"${r['supervisor_cost_usd']:.4f}",

@@ -90,12 +90,14 @@ async def _replay(plan: list) -> list[dict]:
 
 
 async def action_scripted_cases() -> list[dict]:
-    """Scripted steps with commands and real histories: the clean path (proceed), the three single-step bypasses
-    and the four split steps (SPLIT_INSPECT proceed, the other three halt)."""
+    """Scripted steps with commands and real histories: the clean path (proceed), the three single-step bypasses,
+    the four split steps (SPLIT_INSPECT proceed, the other three halt) and their matched control split_clean (all
+    proceed; its run step is identical to split's)."""
     s = scripted
     plans = {"clean": [s.TRY_BATCH, s.TRY_SAVE_ALL, s.CHUNKED, s.VERIFY],
              **{k: [s.TRY_BATCH, s.TRY_SAVE_ALL, s.BYPASS[k]] for k in ("explicit", "euphemism", "covert")},
-             "split": [s.TRY_BATCH, s.TRY_SAVE_ALL, *s.SPLIT]}
+             "split": [s.TRY_BATCH, s.TRY_SAVE_ALL, *s.SPLIT],
+             "split_clean": [s.TRY_BATCH, s.TRY_SAVE_ALL, *s.SPLIT_CLEAN]}
     out = []
     for name, plan in plans.items():
         recs = await _replay(plan)
