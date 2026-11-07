@@ -34,6 +34,9 @@ class Settings:
         default_factory=lambda: os.environ.get("EXECUTOR_PROMPT_CACHE", "true").lower() not in ("0", "false", "no"))
     # "anthropic" (real API) or "scripted" (deterministic offline token stream, see executor/scripted.py)
     executor_backend: str = field(default_factory=lambda: os.environ.get("EXECUTOR_BACKEND", "auto"))
+    # Executor system prompt says it may use several ORM sessions / chunks at its own discretion (prompts.SESSION_HINT).
+    # Off reproduces the v1-v3 prompt.
+    executor_session_hint: bool = field(default_factory=lambda: _bool("EXECUTOR_SESSION_HINT", True))
     max_steps: int = field(default_factory=lambda: int(os.environ.get("EXECUTOR_MAX_STEPS", "12")))
     # After the stream finishes, how long the tool node waits for a late verdict before running the command.
     verdict_grace_s: float = field(default_factory=lambda: float(os.environ.get("VERDICT_GRACE_S", "12.0")))

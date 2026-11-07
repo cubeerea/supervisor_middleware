@@ -72,7 +72,8 @@ def summarize(name: str, cells: list[tuple[str, str]]) -> tuple[list[dict], str]
         sc = m.get("by_scenario", {})
         rows.append({
             "context": ctx, "supervisor": sup, "supervisor_model": m.get("supervisor_model"),
-            "episodes": m["episodes"], "tir": m["tir"], "prevention_rate": m["prevention_rate"],
+            "episodes": m["episodes"], "tir": m.get("tir_raw_sql", m["tir"]), "prevention_rate": m["prevention_rate"],
+            "premature_finishes": m.get("premature_finishes") or {},
             "false_intervention_rate": m["false_intervention_rate"],
             "episodes_violation_executed": m.get("episodes_violation_executed"),
             "episodes_bypass_executed": m.get("episodes_bypass_executed"),
@@ -90,7 +91,8 @@ def summarize(name: str, cells: list[tuple[str, str]]) -> tuple[list[dict], str]
             "executor_cost_usd": m.get("executor_cost_usd"),
         })
     scen = sorted({k for r in rows for k in r.get("tir_by_scenario", {})})
-    head = ["context", "supervisor", "TIR", *[f"TIR {s}" for s in scen], "prevented", "false halts",
+    head = ["context", "supervisor", "TIR (raw SQL)", "premature FINISH halted", *[f"TIR {s}" for s in scen],
+            "prevented", "false halts",
             "episodes raw SQL hit DB", "split: hit DB", "split_clean: false halts", "resubmit after false halt",
             "judge p50 ms", "sup. cost"]
     lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
@@ -101,6 +103,7 @@ def summarize(name: str, cells: list[tuple[str, str]]) -> tuple[list[dict], str]
         ts = r["tir_by_scenario"]
         lines.append("| " + " | ".join([
             r["context"], f"{r['supervisor']} ({r['supervisor_model']})", _f(r["tir"]),
+            f"{r['premature_finishes'].get('halted', 0)}/{r['premature_finishes'].get('proposed', 0)}",
             *[_f(ts.get(s)) for s in scen], _f(r["prevention_rate"]), _f(r["false_intervention_rate"]),
             f"{r['episodes_bypass_executed']}/{r['episodes']}", str(r["split_episodes_bypassed"]),
             "n/a" if r["split_clean_proposals"] is None else
@@ -110,6 +113,21 @@ def summarize(name: str, cells: list[tuple[str, str]]) -> tuple[list[dict], str]
             "n/a" if r["supervisor_cost_usd"] is None else f"${r['supervisor_cost_usd']:.4f}",
         ]) + " |")
     return rows, "\n".join(lines)
+
+
+def rescore(cell: str) -> bool:
+    """Recompute a finished cell's metrics with the current metrics code, keeping run metadata (cost, models)."""
+    from supervisor_middleware.metrics import compute
+    from supervisor_middleware.telemetry import read_events
+
+    d = ROOT / "results" / cell
+    if not (d / "metrics.json").exists():
+        return False
+    old = json.loads((d / "metrics.json").read_text())
+    threads = {e["thread_id"] for e in json.loads((d / "episodes.json").read_text())}
+    old.update(compute(read_events(d / "events.jsonl"), threads))
+    (d / "metrics.json").write_text(json.dumps(old, indent=2))
+    return True
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -129,6 +147,8 @@ def main(argv: list[str] | None = None) -> int:
                          "reasoning cells' late-halt grace (default 200)")
     ap.add_argument("--grace", type=float, help="override the reasoning cells' grace only (default: --verdict-budget)")
     ap.add_argument("--resume", action="store_true", help="skip cells that already have metrics.json")
+    ap.add_argument("--rescore", action="store_true",
+                    help="recompute every finished cell's metrics from its events.jsonl (no runs, no API cost)")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("extra", nargs=argparse.REMAINDER, help="after --: passed to every run_experiment.py")
     a = ap.parse_args(argv)
@@ -139,8 +159,16 @@ def main(argv: list[str] | None = None) -> int:
     if bad:
         raise SystemExit(f"unknown context/supervisor: {bad}")
     cells = [(c, s) for s in sups for c in contexts]
+    if a.rescore:
+        for ctx, sup in cells:
+            print(f"rescored {cell_name(a.name, ctx, sup)}" if rescore(cell_name(a.name, ctx, sup))
+                  else f"skipped {cell_name(a.name, ctx, sup)} (not run)")
+        a.dry_run = False
+        cells_to_run: list[tuple[str, str]] = []
+    else:
+        cells_to_run = cells
     failed = []
-    for ctx, sup in cells:
+    for ctx, sup in cells_to_run:
         cmd = cell_command(a, ctx, sup)
         done = (ROOT / "results" / cell_name(a.name, ctx, sup) / "metrics.json").exists()
         print(f"\n=== {ctx} x {sup}{' (done, skipped)' if done and a.resume else ''}\n$ {' '.join(cmd)}", flush=True)

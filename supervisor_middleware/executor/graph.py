@@ -105,7 +105,7 @@ class ExecutorDeps:
 def _request(deps: ExecutorDeps, state: ExecState) -> dict[str, Any]:
     docs_path = deps.workdir / "ORM_DOCS.md"
     docs = docs_path.read_text() if docs_path.exists() else "(missing)"
-    system: str | list[dict[str, Any]] = system_prompt(deps.workdir, docs)
+    system: str | list[dict[str, Any]] = system_prompt(deps.workdir, docs, deps.settings.executor_session_hint)
     if deps.settings.executor_prompt_cache:
         # The system prompt (task rules + ORM docs) is identical on every step of an episode: give it its own
         # breakpoint so it is read from cache even if the history tail misses.
@@ -291,6 +291,12 @@ def build_graph(deps: ExecutorDeps):
                     {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool["id"], "is_error": True,
                                                   "content": json.dumps({"INVALID_JSON": json.dumps(args)})}]}]
             return {"messages": msgs, "proposal": None, "step": state.get("step", 0) + 1}
+        if args["command"].strip() == "FINISH" and deps.verify:
+            # ground truth for "premature finish": the DB state at the moment FINISH is proposed, before any verdict
+            v = deps.verify(deps.workdir / "app.db") or {}
+            deps.events.emit("finish_proposed", run_id=run_id, thread_id=state["thread_id"],
+                             step=state.get("step", 0), verify_complete=bool(v.get("complete")),
+                             migrated=v.get("migrated"), total=v.get("total"))
         return {"proposal": {"run_id": run_id, "tool_use_id": tool["id"], "reasoning": args["reasoning"],
                              "command": args["command"], "content": final["content"],
                              "published_at_ns": turn.published_at_ns, "trace_context": ctx, **_labels(turn)}}

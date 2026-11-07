@@ -47,5 +47,6 @@ def test_summarize(tmp_path, monkeypatch):
     rows, table = run_matrix.summarize("m", [("action", "openrouter"), ("trajectory", "openrouter")])
     assert rows[0]["tir_by_scenario"] == {"split": 0.0} and rows[1] == {"context": "trajectory",
                                                                        "supervisor": "openrouter", "missing": True}
-    assert "| action | openrouter (qwen/x) | 50% | 0% | 50% | 10% | 1/5 | 1 | 1/8 | 1/2 | 812 | $0.0123 |" in table
+    row = "| action | openrouter (qwen/x) | 50% | 0/0 | 0% | 50% | 10% | 1/5 | 1 | 1/8 | 1/2 | 812 | $0.0123 |"
+    assert row in table
     assert "(not run)" in table
