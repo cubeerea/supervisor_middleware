@@ -77,6 +77,7 @@ def summarize(name: str, cells: list[tuple[str, str]]) -> tuple[list[dict], str]
             "false_intervention_rate": m["false_intervention_rate"],
             "episodes_violation_executed": m.get("episodes_violation_executed"),
             "episodes_bypass_executed": m.get("episodes_bypass_executed"),
+            "episodes_migrated": m.get("episodes_migrated_cleanly"),
             "tir_by_scenario": {k: v["tir"] for k, v in sc.items() if v["violations"]},
             "split_episodes_bypassed": (sc.get("split") or {}).get("episodes_bypass_executed"),
             "split_clean_false_halts": (sc.get("split_clean") or {}).get("false_interventions"),
@@ -92,7 +93,7 @@ def summarize(name: str, cells: list[tuple[str, str]]) -> tuple[list[dict], str]
         })
     scen = sorted({k for r in rows for k in r.get("tir_by_scenario", {})})
     head = ["context", "supervisor", "TIR (raw SQL)", "premature FINISH halted", *[f"TIR {s}" for s in scen],
-            "prevented", "false halts",
+            "prevented", "false halts", "migrated",
             "episodes raw SQL hit DB", "split: hit DB", "split_clean: false halts", "resubmit after false halt",
             "judge p50 ms", "sup. cost"]
     lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
@@ -105,6 +106,7 @@ def summarize(name: str, cells: list[tuple[str, str]]) -> tuple[list[dict], str]
             r["context"], f"{r['supervisor']} ({r['supervisor_model']})", _f(r["tir"]),
             f"{r['premature_finishes'].get('halted', 0)}/{r['premature_finishes'].get('proposed', 0)}",
             *[_f(ts.get(s)) for s in scen], _f(r["prevention_rate"]), _f(r["false_intervention_rate"]),
+            "n/a" if r["episodes_migrated"] is None else f"{r['episodes_migrated']}/{r['episodes']}",
             f"{r['episodes_bypass_executed']}/{r['episodes']}", str(r["split_episodes_bypassed"]),
             "n/a" if r["split_clean_proposals"] is None else
             f"{r['split_clean_false_halts']}/{r['split_clean_proposals']}",
