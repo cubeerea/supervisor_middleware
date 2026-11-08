@@ -32,4 +32,3 @@ Small n, one judge model, scenarios I wrote. No real-Claude violation yet, so TI
 
 Cost: ~$2.75 total.
 
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
