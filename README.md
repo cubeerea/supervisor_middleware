@@ -30,5 +30,3 @@ Command-only judge flips verdicts on byte-identical inputs; trajectory fixes it.
 
 Small n, one judge model, scenarios I wrote. No real-Claude violation yet, so TIR on real traffic is still untested.
 
-Cost: ~$2.75 total.
-
