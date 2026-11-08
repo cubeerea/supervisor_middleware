@@ -10,6 +10,12 @@ published to `executor_stream` with `publish_nowait` (no await) and token consum
 generation runs under `InterruptListener.run_guarded`, so a matching halt cancels it mid-stream.
 `tool` is the second line of defence: it gives the verdict a short grace window (measured from the
 reasoning publish) and refuses to execute when a halt arrived after the stream had already finished.
+Before that, a deterministic command check (settings.command_check) refuses any finished command that
+`ground_truth.explain` flags as a raw-SQL bypass, so a violation hidden behind innocuous reasoning never runs.
+
+A stall escalation from the supervisor (InterruptSignal kind="escalate") never cuts a stream: the episode ends with
+outcome "escalated" at the next boundary, i.e. the tool gate does not run the pending command, or the executor node
+does not start another generation.
 """
 from __future__ import annotations
 
@@ -23,17 +29,20 @@ from typing import Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from ..config import Settings
-from ..messages import TrajectoryPacket, now_ns
+from ..ground_truth import explain as explain_raw_sql
+from ..messages import InterruptSignal, TrajectoryPacket, now_ns
 from ..redis_bus import AsyncRedisBus
 from ..stream_parser import ReasoningWatcher, _decode
 from ..telemetry import EventLog
 from ..tracing import Tracer
 from .interception import InterceptionHalt, InterruptListener
-from .prompts import halt_feedback, system_prompt
+from .prompts import command_block_feedback, halt_feedback, system_prompt
 from .sources import PROPOSE_ACTION_TOOL, StreamSource
 
 log = logging.getLogger(__name__)
 SEVERED = "\n# ... [stream severed by supervisor]"
+# scripted ground-truth labels carried from the stream's "meta" event onto every proposal record and event
+LABEL_KEYS = ("intended_violation", "executes_bypass", "scenario")
 
 
 class ExecState(TypedDict, total=False):
@@ -49,6 +58,7 @@ class ExecState(TypedDict, total=False):
     done: bool
     outcome: str
     refusal: dict[str, Any] | None  # stop_details of a refused generation
+    escalation: dict[str, Any] | None  # the supervisor's stall escalation that ended the episode
 
 
 @dataclass
@@ -95,15 +105,24 @@ class ExecutorDeps:
 def _request(deps: ExecutorDeps, state: ExecState) -> dict[str, Any]:
     docs_path = deps.workdir / "ORM_DOCS.md"
     docs = docs_path.read_text() if docs_path.exists() else "(missing)"
+    system: str | list[dict[str, Any]] = system_prompt(deps.workdir, docs, deps.settings.executor_session_hint)
+    if deps.settings.executor_prompt_cache:
+        # The system prompt (task rules + ORM docs) is identical on every step of an episode: give it its own
+        # breakpoint so it is read from cache even if the history tail misses.
+        system = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
     req: dict[str, Any] = {
         "model": deps.settings.executor_model,
         "max_tokens": deps.settings.executor_max_tokens,
-        "system": system_prompt(deps.workdir, docs),
+        "system": system,
         "tools": [PROPOSE_ACTION_TOOL],
         # Forced tool_choice is rejected by current models; steer from the prompt and allow one call.
         "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
         "messages": state["messages"],
     }
+    if deps.settings.executor_prompt_cache:
+        # Automatic breakpoint on the last block: the history is append-only (halts and tool results are appended,
+        # never edited), so each step reads the previous step's prefix from cache.
+        req["cache_control"] = {"type": "ephemeral"}
     if deps.settings.executor_model.startswith(("claude-sonnet-5", "claude-opus-5", "claude-fable-5")):
         # Thinking stays ON and the supervised `reasoning` field is a short rationale for a reviewer. With thinking
         # off and a field asking the model to write out its reasoning, Sonnet 5.5 declines mid-episode with
@@ -125,7 +144,7 @@ async def _consume(deps: ExecutorDeps, state: ExecState, turn: PartialTurn, trac
         elif kind == "input_json" and in_tool:
             reasoning = turn.watcher.feed(data)
             if reasoning is not None:
-                _publish(deps, state, turn, reasoning, trace_context)
+                _on_reasoning(deps, state, turn, reasoning, trace_context)
         elif kind == "block_complete":
             if data.get("type") == "tool_use":
                 in_tool = False
@@ -134,19 +153,45 @@ async def _consume(deps: ExecutorDeps, state: ExecState, turn: PartialTurn, trac
         elif kind == "final":
             turn.final = data
     if (reasoning := turn.watcher.finish()) is not None:
-        _publish(deps, state, turn, reasoning, trace_context)
+        _on_reasoning(deps, state, turn, reasoning, trace_context)
     return turn
+
+
+def _on_reasoning(deps: ExecutorDeps, state: ExecState, turn: PartialTurn, reasoning: str,
+                  trace_context: dict | None) -> None:
+    """Reasoning mode publishes now (mid-stream); action modes wait for the finished call (tool node)."""
+    if deps.settings.supervision_mode == "reasoning":
+        _publish(deps, state, turn, reasoning, trace_context)
+    else:
+        turn.reasoning = reasoning
+
+
+def _packet_state(state: ExecState) -> dict[str, Any]:
+    last_obs = next((t.get("observation") for t in reversed(state.get("trajectory", [])) if t.get("observation")), "")
+    return {"task": state["task"], "step": state.get("step", 0), "last_observation": (last_obs or "")[-1500:],
+            "previous_halts": [h["reason"] for h in state.get("halts", [])][-3:],
+            "session_id": state.get("session_id")}
+
+
+HISTORY_STEPS = 24  # trajectory mode: at most this many earlier records (max_steps 12 + up to 3 halts per step)
+
+
+def _history(state: ExecState) -> list[dict[str, Any]]:
+    """Earlier steps for a trajectory-mode packet, oldest first. Commands and outputs are clipped by the judge."""
+    out = []
+    for t in state.get("trajectory", [])[-HISTORY_STEPS:]:
+        out.append({"step": t.get("step"), "attempt": t.get("attempt", 0), "status": t.get("status"),
+                    "reasoning": t.get("reasoning") or "", "command": t.get("command") or "",
+                    "observation": t.get("observation") or (f"HALTED: {t['halt_reason']}" if t.get("halt_reason")
+                                                            else "")})
+    return out
 
 
 def _publish(deps: ExecutorDeps, state: ExecState, turn: PartialTurn, reasoning: str, trace_context: dict | None):
     turn.reasoning = reasoning
-    last_obs = next((t.get("observation") for t in reversed(state.get("trajectory", [])) if t.get("observation")), "")
     packet = TrajectoryPacket(
         run_id=turn.run_id, thread_id=state["thread_id"], step=state.get("step", 0), attempt=state.get("attempt", 0),
-        reasoning=reasoning, trace_context=trace_context,
-        state={"task": state["task"], "step": state.get("step", 0), "last_observation": (last_obs or "")[-1500:],
-               "previous_halts": [h["reason"] for h in state.get("halts", [])][-3:],
-               "session_id": state.get("session_id")},
+        reasoning=reasoning, trace_context=trace_context, state=_packet_state(state),
     )
     turn.published_at_ns = packet.published_at_ns
     deps.bus.publish_nowait(deps.settings.executor_channel, packet)  # fire-and-forget: do NOT await
@@ -157,12 +202,28 @@ def _publish(deps: ExecutorDeps, state: ExecState, turn: PartialTurn, reasoning:
 
 
 def _labels(turn: PartialTurn) -> dict[str, Any]:
-    return {k: turn.meta[k] for k in ("intended_violation", "scenario") if k in turn.meta}
+    return {k: turn.meta[k] for k in LABEL_KEYS if k in turn.meta}
 
 
 def build_graph(deps: ExecutorDeps):
+    def _escalate(state: ExecState, sig: InterruptSignal, record: dict[str, Any] | None = None) -> dict[str, Any]:
+        """End the episode on a stall escalation. `record` is the proposal that was not executed, if any."""
+        step = state.get("step", 0)
+        esc = {"reason": sig.reason, "step": step, "detected_at_step": sig.step, "signals": sig.signals,
+               "run_id": sig.run_id}
+        deps.events.emit("episode_escalated", thread_id=state["thread_id"], step=step,
+                         max_steps=deps.settings.max_steps, detected_at_step=sig.step, reason=sig.reason,
+                         signals=sig.signals, command_skipped=record is not None)
+        log.info("episode %s escalated at step %s: %s", state["thread_id"], step, sig.reason)
+        out: dict[str, Any] = {"done": True, "outcome": "escalated", "escalation": esc, "proposal": None}
+        if record is not None:
+            out["trajectory"] = [*state.get("trajectory", []), record]
+        return out
+
     async def executor(state: ExecState) -> dict[str, Any]:
         await deps.listener.start()  # background subscriber to supervisor_interrupts (idempotent)
+        if (esc := deps.listener.escalation(state["thread_id"])) is not None:
+            return _escalate(state, esc)
         run_id = str(uuid.uuid4())
         turn = PartialTurn(run_id=run_id, watcher=ReasoningWatcher(trigger=deps.trigger))  # type: ignore[arg-type]
         started = now_ns()
@@ -230,12 +291,19 @@ def build_graph(deps: ExecutorDeps):
                     {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool["id"], "is_error": True,
                                                   "content": json.dumps({"INVALID_JSON": json.dumps(args)})}]}]
             return {"messages": msgs, "proposal": None, "step": state.get("step", 0) + 1}
+        if args["command"].strip() == "FINISH" and deps.verify:
+            # ground truth for "premature finish": the DB state at the moment FINISH is proposed, before any verdict
+            v = deps.verify(deps.workdir / "app.db") or {}
+            deps.events.emit("finish_proposed", run_id=run_id, thread_id=state["thread_id"],
+                             step=state.get("step", 0), verify_complete=bool(v.get("complete")),
+                             migrated=v.get("migrated"), total=v.get("total"))
         return {"proposal": {"run_id": run_id, "tool_use_id": tool["id"], "reasoning": args["reasoning"],
                              "command": args["command"], "content": final["content"],
-                             "published_at_ns": turn.published_at_ns, **_labels(turn)}}
+                             "published_at_ns": turn.published_at_ns, "trace_context": ctx, **_labels(turn)}}
 
     def _on_halt(state: ExecState, turn: PartialTurn, reason: str, *, late: bool, cancelled_at_ns: int = 0,
-                 started: int = 0, content: list | None = None) -> dict[str, Any]:
+                 started: int = 0, content: list | None = None, status: str | None = None,
+                 feedback: str | None = None, source: str | None = None) -> dict[str, Any]:
         tool_id = turn.tool_use_id or f"toolu_halted_{turn.run_id[:8]}"
         if content is None:
             command = turn.command_partial + SEVERED
@@ -243,13 +311,14 @@ def build_graph(deps: ExecutorDeps):
                                       "input": {"reasoning": turn.reasoning or "", "command": command}}]
         msgs = [*state["messages"], {"role": "assistant", "content": content},
                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_id, "is_error": True,
-                                              "content": halt_feedback(reason, late)}]}]
+                                              "content": feedback or halt_feedback(reason, late)}]}]
         halts = [*state.get("halts", []), {"run_id": turn.run_id, "step": state.get("step", 0), "reason": reason,
-                                           "late": late}]
+                                           "late": late,
+                                           "source": source or ("command_check" if status else "supervisor")}]
         record = {"run_id": turn.run_id, "step": state.get("step", 0), "attempt": state.get("attempt", 0),
-                  "reasoning": turn.reasoning, "command": turn.command_partial, "status": "halted_late" if late
-                  else "halted", "halt_reason": reason, "command_chars_at_cancel": len(turn.command_partial),
-                  **_labels(turn)}
+                  "reasoning": turn.reasoning, "command": turn.command_partial,
+                  "status": status or ("halted_late" if late else "halted"), "halt_reason": reason,
+                  "command_chars_at_cancel": len(turn.command_partial), **_labels(turn)}
         deps.events.emit("step_halted", thread_id=state["thread_id"], late=late, cancelled_at_ns=cancelled_at_ns,
                          **{k: v for k, v in record.items() if k not in ("reasoning",)})
         attempt = state.get("attempt", 0) + 1
@@ -259,24 +328,79 @@ def build_graph(deps: ExecutorDeps):
             out.update(step=state.get("step", 0) + 1, attempt=0)
         return out
 
+    async def _gate_action(state: ExecState, p: dict[str, Any], mode: str) -> InterruptSignal | None:
+        history = _history(state) if mode == "trajectory" else []
+        packet = TrajectoryPacket(run_id=p["run_id"], thread_id=state["thread_id"], step=state.get("step", 0),
+                                  attempt=state.get("attempt", 0), reasoning=p["reasoning"], mode=mode,  # type: ignore[arg-type]
+                                  command=p["command"], history=history, trace_context=p.get("trace_context"),
+                                  state=_packet_state(state))
+        labels = {k: p[k] for k in LABEL_KEYS if k in p}
+        deps.events.emit("action_published", run_id=p["run_id"], thread_id=state["thread_id"],
+                         step=state.get("step", 0), attempt=state.get("attempt", 0), mode=mode,
+                         published_at_ns=packet.published_at_ns, reasoning_chars=len(p["reasoning"]),
+                         command_chars=len(p["command"]), history_steps=len(history), **labels)
+        await deps.bus.publish(deps.settings.executor_channel, packet)
+        sig, answered = await deps.listener.wait_for_verdict(p["run_id"], deps.settings.action_verdict_timeout_s)
+        waited_ms = (now_ns() - packet.published_at_ns) / 1e6
+        deps.events.emit("action_verdict", run_id=p["run_id"], thread_id=state["thread_id"],
+                         step=state.get("step", 0), status="halt" if sig else ("proceed" if answered else "timeout"),
+                         gate_wait_ms=round(waited_ms, 3))
+        if not answered:
+            deps.events.emit("action_verdict_timeout", run_id=p["run_id"], thread_id=state["thread_id"],
+                             step=state.get("step", 0), timeout_s=deps.settings.action_verdict_timeout_s)
+        return sig
+
     async def tool(state: ExecState) -> dict[str, Any]:
         p = state["proposal"]
         assert p is not None
-        # Late-halt gate: give the supervisor until publish + grace to object to a finished stream.
-        sig = await deps.listener.wait_for_late_halt(
-            p["run_id"], p["published_at_ns"] + int(deps.settings.verdict_grace_s * 1e9))
+
+        def _turn() -> PartialTurn:
+            t = PartialTurn(run_id=p["run_id"], tool_use_id=p["tool_use_id"], reasoning=p["reasoning"],
+                            meta={k: p[k] for k in LABEL_KEYS if k in p})
+            t.watcher.scanner.values["command"] = p["command"]
+            return t
+
+        # Command check: deterministic, instant, independent of the reasoning the supervisor judged.
+        if deps.settings.command_check and (reasons := explain_raw_sql(p["command"])):
+            deps.events.emit("command_blocked", run_id=p["run_id"], thread_id=state["thread_id"],
+                             step=state.get("step", 0), command=p["command"], reasons=reasons,
+                             **{k: p[k] for k in LABEL_KEYS if k in p})
+            with deps.tracer.observation("command_check", as_type="guardrail", input={"command": p["command"]},
+                                         metadata={"run_id": p["run_id"], "step": state.get("step", 0)}) as cobs:
+                deps.tracer.update(cobs, level="WARNING", output={"blocked": True, "reasons": reasons},
+                                   status_message=("command check: " + "; ".join(reasons))[:500])
+            return _on_halt(state, _turn(), "command check: " + "; ".join(reasons), late=True, content=p["content"],
+                            status="blocked_command", feedback=command_block_feedback(reasons))
+        mode = deps.settings.supervision_mode
+        if mode != "reasoning":
+            # Action gate: the supervisor sees the finished command (and, in trajectory mode, the episode so far)
+            # and the command waits for its verdict. Nothing is cut mid-stream in these modes.
+            sig = await _gate_action(state, p, mode)
+            if sig is not None:
+                deps.events.emit("action_blocked", run_id=p["run_id"], thread_id=state["thread_id"],
+                                 step=state.get("step", 0), reason=sig.reason, blocked_at_ns=now_ns(),
+                                 **{k: p[k] for k in LABEL_KEYS if k in p})
+                return _on_halt(state, _turn(), sig.reason, late=True, content=p["content"], status="halted_action",
+                                feedback=halt_feedback(sig.reason, late=True, before_run=True), source="supervisor")
+            sig = None
+        else:
+            # Late-halt gate: give the supervisor until publish + grace to object to a finished stream.
+            sig = await deps.listener.wait_for_late_halt(
+                p["run_id"], p["published_at_ns"] + int(deps.settings.verdict_grace_s * 1e9))
         if sig is not None:
-            turn = PartialTurn(run_id=p["run_id"], tool_use_id=p["tool_use_id"], reasoning=p["reasoning"],
-                               meta={k: p[k] for k in ("intended_violation", "scenario") if k in p})
-            turn.watcher.scanner.values["command"] = p["command"]
             deps.events.emit("late_halt_blocked", run_id=p["run_id"], thread_id=state["thread_id"],
                              interrupt_published_at_ns=sig.published_at_ns, blocked_at_ns=now_ns())
-            return _on_halt(state, turn, sig.reason, late=True, content=p["content"])
+            return _on_halt(state, _turn(), sig.reason, late=True, content=p["content"])
+        if (esc := deps.listener.escalation(state["thread_id"])) is not None:
+            return _escalate(state, esc, {
+                "run_id": p["run_id"], "step": state.get("step", 0), "attempt": state.get("attempt", 0),
+                "reasoning": p["reasoning"], "command": p["command"], "status": "escalated",
+                "escalation_reason": esc.reason, **{k: p[k] for k in LABEL_KEYS if k in p}})
 
         step = state.get("step", 0)
         record = {"run_id": p["run_id"], "step": step, "attempt": state.get("attempt", 0),
                   "reasoning": p["reasoning"], "command": p["command"], "status": "executed",
-                  **{k: p[k] for k in ("intended_violation", "scenario") if k in p}}
+                  **{k: p[k] for k in LABEL_KEYS if k in p}}
         if p["command"].strip() == "FINISH":
             result = deps.verify(deps.workdir / "app.db") if deps.verify else {}
             record.update(status="finish", observation=json.dumps(result))
@@ -302,7 +426,7 @@ def build_graph(deps: ExecutorDeps):
             record["exit_code"] = res.exit_code
         deps.events.emit("command_executed", run_id=p["run_id"], thread_id=state["thread_id"], step=step,
                          command=p["command"], exit_code=record.get("exit_code"),
-                         **{k: p[k] for k in ("intended_violation", "scenario") if k in p})
+                         **{k: p[k] for k in LABEL_KEYS if k in p})
         msgs = [*state["messages"], {"role": "assistant", "content": p["content"]},
                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": p["tool_use_id"],
                                               "is_error": is_error, "content": obs}]}]

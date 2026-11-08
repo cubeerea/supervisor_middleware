@@ -29,17 +29,59 @@ class Settings:
     executor_model: str = field(default_factory=lambda: os.environ.get("EXECUTOR_MODEL", "claude-sonnet-5-5"))
     executor_max_tokens: int = field(default_factory=lambda: int(os.environ.get("EXECUTOR_MAX_TOKENS", "16000")))
     executor_effort: str = field(default_factory=lambda: os.environ.get("EXECUTOR_EFFORT", "medium"))
+    # Prompt caching: explicit breakpoint on the static system prompt + automatic breakpoint on the growing history.
+    executor_prompt_cache: bool = field(
+        default_factory=lambda: os.environ.get("EXECUTOR_PROMPT_CACHE", "true").lower() not in ("0", "false", "no"))
     # "anthropic" (real API) or "scripted" (deterministic offline token stream, see executor/scripted.py)
     executor_backend: str = field(default_factory=lambda: os.environ.get("EXECUTOR_BACKEND", "auto"))
+    # Executor system prompt says it may use several ORM sessions / chunks at its own discretion (prompts.SESSION_HINT).
+    # Off reproduces the v1-v3 prompt.
+    executor_session_hint: bool = field(default_factory=lambda: _bool("EXECUTOR_SESSION_HINT", True))
     max_steps: int = field(default_factory=lambda: int(os.environ.get("EXECUTOR_MAX_STEPS", "12")))
     # After the stream finishes, how long the tool node waits for a late verdict before running the command.
-    verdict_grace_s: float = field(default_factory=lambda: float(os.environ.get("VERDICT_GRACE_S", "3.0")))
+    verdict_grace_s: float = field(default_factory=lambda: float(os.environ.get("VERDICT_GRACE_S", "12.0")))
 
     # Supervisor (local Qwen through Ollama's HTTP API)
     supervisor_backend: str = field(default_factory=lambda: os.environ.get("SUPERVISOR_BACKEND", "ollama"))
     ollama_url: str = field(default_factory=lambda: os.environ.get("OLLAMA_URL", "http://localhost:11434"))
     supervisor_model: str = field(default_factory=lambda: os.environ.get("SUPERVISOR_MODEL", "qwen2.5:3b-instruct"))
+    # "verdict": the model writes {reason, status}. "checklist": it names the step's action and answers three yes/no
+    # rule questions; the verdict is derived in code (fewer false halts on reasoning that rejects a forbidden option).
+    # "cascade": SUPERVISOR_MODEL screens every step in verdict mode; only its halts are re-checked by
+    # SUPERVISOR_CONFIRM_MODEL in checklist mode, and a halt needs both.
+    supervisor_judge_mode: str = field(default_factory=lambda: os.environ.get("SUPERVISOR_JUDGE_MODE", "cascade"))
+    supervisor_confirm_model: str = field(
+        default_factory=lambda: os.environ.get("SUPERVISOR_CONFIRM_MODEL", "qwen2.5-coder:7b"))
     supervisor_timeout_s: float = field(default_factory=lambda: float(os.environ.get("SUPERVISOR_TIMEOUT_S", "30")))
+    # Ollama context window for the judge (0 = Ollama's default, ~2-4k tokens, which silently truncates trajectory
+    # prompts). Changing it reloads the model, so set it once per daemon.
+    supervisor_num_ctx: int = field(default_factory=lambda: int(os.environ.get("SUPERVISOR_NUM_CTX", "0")))
+
+    # What the supervisor judges, and when:
+    #   "reasoning"   packet on the closing quote of `reasoning` (rationale + last observation); a halt can cut the
+    #                 stream mid-command (the original design)
+    #   "action"      packet once the ProposeAction call is complete (reasoning + command); the tool gate blocks
+    #                 until the verdict arrives
+    #   "trajectory"  "action" plus every earlier step of the episode (reasoning, command, output)
+    supervision_mode: str = field(default_factory=lambda: os.environ.get("SUPERVISION_MODE", "reasoning"))
+    # Action modes: longest the tool gate waits for a verdict. On timeout the command runs (fail-open, like the
+    # judge's own error handling) and an `action_verdict_timeout` event is logged so it shows up in the metrics.
+    action_verdict_timeout_s: float = field(
+        default_factory=lambda: float(os.environ.get("ACTION_VERDICT_TIMEOUT_S", "90")))
+
+    # OpenRouter supervisor (SUPERVISOR_BACKEND=openrouter): any model with structured-output support.
+    openrouter_api_key: str = field(default_factory=lambda: os.environ.get("OPENROUTER_API_KEY", ""))
+    openrouter_url: str = field(default_factory=lambda: os.environ.get("OPENROUTER_URL",
+                                                                       "https://openrouter.ai/api/v1"))
+    openrouter_model: str = field(default_factory=lambda: os.environ.get("OPENROUTER_MODEL", "qwen/qwen3-coder-next"))
+    # Reasoning effort for thinking models ("", "minimal", "low", "medium", "high"); "" = the provider's default.
+    openrouter_reasoning_effort: str = field(default_factory=lambda: os.environ.get("OPENROUTER_REASONING_EFFORT", ""))
+    # Command check (executor tool gate): refuse to run a finished command that ground_truth.explain flags as a
+    # raw-SQL bypass, whatever its reasoning says. Catches the covert case the reasoning-only supervisor cannot see.
+    command_check: bool = field(default_factory=lambda: _bool("COMMAND_CHECK", True))
+    # Stall detection (supervisor/stall.py): escalate an episode that makes no progress over STALL_WINDOW steps.
+    stall_detection: bool = field(default_factory=lambda: _bool("STALL_DETECTION", True))
+    stall_window: int = field(default_factory=lambda: int(os.environ.get("STALL_WINDOW", "3")))
 
     # Telemetry
     events_path: Path = field(

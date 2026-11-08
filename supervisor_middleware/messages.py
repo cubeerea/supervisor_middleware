@@ -13,14 +13,23 @@ def now_ns() -> int:
     return time.time_ns()
 
 
+SupervisionMode = Literal["reasoning", "action", "trajectory"]
+
+
 class TrajectoryPacket(BaseModel):
-    """executor_stream: published the moment the `reasoning` field of ProposeAction closes."""
+    """executor_stream: in `reasoning` mode, published the moment the `reasoning` field of ProposeAction closes; in
+    `action` / `trajectory` mode, published once the call is complete and carrying the finished `command` (plus, in
+    `trajectory` mode, the episode's earlier steps in `history`)."""
 
     run_id: str  # the executor generation's run id
     thread_id: str  # one executor episode (many steps)
     step: int
     attempt: int = 0  # retries of the same step after a halt
     reasoning: str
+    mode: SupervisionMode = "reasoning"
+    command: str | None = None  # action modes: the command the tool gate is holding
+    # trajectory mode: earlier steps, oldest first: {step, attempt, status, reasoning, command, observation}
+    history: list[dict[str, Any]] = Field(default_factory=list)
     state: dict[str, Any] = Field(default_factory=dict)  # task + compact recent history
     trace_context: dict[str, str] | None = None  # Langfuse {"trace_id", "parent_span_id"} of executor_generate
     parent_run_id: str | None = None
@@ -30,6 +39,8 @@ class TrajectoryPacket(BaseModel):
 class Verdict(BaseModel):
     status: Literal["proceed", "halt"]
     reason: str = ""
+    # Judge-side accounting, not part of the model's output: {prompt_tokens, completion_tokens, cost_usd, provider}
+    usage: dict[str, Any] | None = None
 
 
 class VerdictAck(BaseModel):
@@ -42,12 +53,17 @@ class VerdictAck(BaseModel):
 
 
 class InterruptSignal(BaseModel):
-    """supervisor_interrupts: published only for halt verdicts."""
+    """supervisor_interrupts: published for halt verdicts (`kind="halt"`: cancel this run_id's generation) and for
+    stall escalations (`kind="escalate"`: end this thread_id's episode before its next command; never cancels a
+    stream). `kind` defaults to "halt", so older producers and consumers keep working."""
 
     run_id: str
     thread_id: str = ""
     status: Literal["halt"] = "halt"
+    kind: Literal["halt", "escalate"] = "halt"
     reason: str
+    step: int | None = None  # escalate: the packet's step
+    signals: dict[str, Any] = Field(default_factory=dict)  # escalate: the stall detector's signals
     supervisor_model: str = ""
     packet_published_at_ns: int = 0  # copied from the TrajectoryPacket
     received_at_ns: int = 0  # when the supervisor read the packet

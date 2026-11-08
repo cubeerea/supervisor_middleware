@@ -13,3 +13,5 @@ progress.json
 progress.json.tmp
 .agent/
 .env.langfuse
+.gstack/
+.claude/worktrees/
